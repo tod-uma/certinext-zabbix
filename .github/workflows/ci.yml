@@ -5,6 +5,10 @@ on:
   pull_request:
 
 jobs:
+  # This repo's uv.lock is gitignored (unlike certinext's, which commits
+  # it and uses `uv sync --locked`) — matching .gitlab-ci.yml's approach
+  # of installing straight into the interpreter instead, so there's one
+  # dependency-resolution story across both CI systems, not two.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -13,8 +17,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install uv
-      - run: uv sync --locked --extra dev
-      - run: uv run ruff check .
+      - run: uv pip install --system -e .[dev]
+      - run: ruff check .
 
   typecheck:
     runs-on: ubuntu-latest
@@ -24,9 +28,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install uv
-      - run: uv sync --locked --extra dev
-      - run: uv run mypy certinext_zabbix
-      - run: uv run pyright
+      - run: uv pip install --system -e .[dev]
+      - run: mypy certinext_zabbix
+      - run: pyright
 
   test:
     runs-on: ubuntu-latest
@@ -41,8 +45,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
       - run: pip install uv
-      - run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
-      - run: uv run pytest tests/ -v --junitxml=report.xml
+      - run: uv pip install --system -e .[dev]
+      - run: pytest tests/ -v --junitxml=report.xml
       - uses: actions/upload-artifact@v7
         if: always()
         with:
