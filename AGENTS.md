@@ -84,7 +84,9 @@ below).
 
 The git remote is named `gitlab` (no `origin`). GitLab is canonical;
 `github.com/tod-uma/certinext-zabbix` is a push mirror — push to
-`gitlab`, never directly to GitHub.
+`gitlab`, never directly to GitHub. The mirror also runs its own CI
+(`.github/workflows/ci.yml`, copied from `certinext`'s pattern) so
+external contributors' PRs get checks GitLab's pipelines never see them.
 
 ## ADRs and wishlist
 
