@@ -2,17 +2,20 @@
 
 ## GitLab project path
 
-`sysadmin/certinext-zabbix` on gitlab.its.maine.edu — use for GitLab CI
-references, clone URLs, and API calls. This is the canonical repo; CI
-runs here.
+`sysadmin/certinext-zabbix` on `gitlab.its.maine.edu` — the University of
+Maine System's internal GitLab instance, not reachable from outside
+UMS's network/VPN. Use it for GitLab CI references, clone URLs, and API
+calls. This is the canonical repo; CI runs here. External contributors
+work against the public GitHub mirror instead (see below).
 
 ## Remotes and the GitHub mirror
 
 The git remote is named `gitlab` (no `origin`, per this org's convention).
-gitlab.its.maine.edu is canonical; `github.com/tod-uma/certinext-zabbix`
-is a GitLab **push mirror** — the public face for InCommon/higher-ed
-users, configured in GitLab under *Settings → Repository → Mirroring
-repositories*. Push to `gitlab`; never push directly to GitHub.
+`gitlab.its.maine.edu` (UMS-internal) is canonical;
+`github.com/tod-uma/certinext-zabbix` is a GitLab **push mirror** — the
+public, no-login-required face for InCommon/higher-ed users, configured
+in GitLab under *Settings → Repository → Mirroring repositories*. Push
+to `gitlab`; never push directly to GitHub.
 
 ## Copy-not-canonical (until Phase 6)
 
@@ -75,6 +78,19 @@ has a commented stub for this.
 MIT (chosen for Zabbix community-templates submission-readiness — that
 repo accepts MIT only). No per-file license headers; the root `LICENSE`
 governs.
+
+## ADRs and wishlist
+
+Architecture decisions live in `docs/adr/` (MADR format, numbered
+sequentially, e.g. `0001-standalone-repo.md`); deferred "not now" ideas
+live in `docs/wishlist/` (`IDEA-NNN-slug.md`, indexed in
+`docs/wishlist/README.md`). Several of this repo's foundational decisions
+(standalone repo, copy-now/canonical-later, PyPI-not-published-yet,
+GitHub push mirror, MIT license, community-templates-ready layout) are
+recorded as ADRs 0001–0006 — read them before revisiting any of those
+choices. When a durable decision gets settled in conversation, record it
+as a new ADR rather than leaving the rationale only in a commit message
+or chat history.
 
 ## AGENTS.md
 

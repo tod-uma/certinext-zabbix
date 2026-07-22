@@ -63,23 +63,38 @@ conftest.
 
 ## Copy-not-canonical
 
-This repo is a sanitized copy of code that also lives in the UMS-internal
-`ums-certinext-scripts` repo, which remains the canonical source UMS
-deploys from until a future, effort-gated migration. Two sources of
-truth exist for the push logic, the template, and the `KEY_*` constants
-in the interim — see [CLAUDE.md](CLAUDE.md) for the full explanation.
-Don't assume a change here is mirrored there, or vice versa.
+This repo is a sanitized copy of code that also lives in
+`ums-certinext-scripts` — a University of Maine System (UMS) internal
+repository, **not publicly accessible** — which remains the canonical
+source UMS deploys from until a future, effort-gated migration. Two
+sources of truth exist for the push logic, the template, and the `KEY_*`
+constants in the interim — see [CLAUDE.md](CLAUDE.md) for the full
+explanation. Don't assume a change here is mirrored there, or vice
+versa.
 
 ## GitLab project path
 
-`sysadmin/certinext-zabbix` on gitlab.its.maine.edu — use for GitLab CI
-references, clone URLs, and API calls.
+`sysadmin/certinext-zabbix` on `gitlab.its.maine.edu` — UMS's internal
+GitLab instance, not reachable from outside UMS's network/VPN. Use it
+for GitLab CI references, clone URLs, and API calls. External
+contributors should work against the public GitHub mirror instead (see
+below).
 
 ## Remotes and mirror
 
 The git remote is named `gitlab` (no `origin`). GitLab is canonical;
 `github.com/tod-uma/certinext-zabbix` is a push mirror — push to
 `gitlab`, never directly to GitHub.
+
+## ADRs and wishlist
+
+Architecture decisions: `docs/adr/` (MADR format, sequential
+`NNNN-slug.md`). Deferred ideas: `docs/wishlist/` (`IDEA-NNN-slug.md`,
+indexed in `docs/wishlist/README.md`). ADRs 0001–0006 already cover this
+repo's foundational decisions (standalone repo, copy-now/canonical-later,
+PyPI-not-published-yet, GitHub push mirror, MIT license,
+community-templates-ready layout) — check there before re-litigating any
+of them.
 
 ## Releasing
 

@@ -3,9 +3,10 @@
 > CertiNext DCV health monitoring for Zabbix: a trapper-only Zabbix
 > template (`templates/template_certinext/7.0/`) plus the
 > `certinext-zabbix-push` typer CLI that feeds it. Public, PyPI-ready
-> (not yet published); a sanitized copy of code that also lives in the
-> UMS-internal `ums-certinext-scripts` repo, which remains canonical
-> until a future migration — see CLAUDE.md.
+> (not yet published); a sanitized copy of code that also lives in
+> `ums-certinext-scripts`, a University of Maine System (UMS) internal
+> repository — not publicly accessible — which remains canonical until
+> a future migration — see CLAUDE.md.
 
 Start with the [AI-agent quickstart](README.md#ai-agent-quickstart)
 section of the README — install command, credential model, and the rule
@@ -38,6 +39,13 @@ would do.
   `docs/deployment.md`. `examples/windows/` is explicitly untested —
   written by analogy with the systemd/cron examples, not verified
   against a real Windows host.
+- [docs/adr/](docs/adr/): accepted architecture decisions (MADR format)
+  — start with ADRs 0001–0006, this repo's foundational decisions
+  (standalone repo, copy-now/canonical-later, PyPI-not-published-yet,
+  GitHub push mirror, MIT license, community-templates-ready layout).
+- [docs/wishlist/](docs/wishlist/): ideas deferred for later, with the
+  reasoning for deferring — see `docs/wishlist/README.md` for the index
+  and status vocabulary.
 
 ## Reference
 
