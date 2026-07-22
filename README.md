@@ -79,6 +79,15 @@ wanted.
 The pushed metrics are printed to stdout as one JSON object; logs go to
 stderr.
 
+## What it looks like
+
+Zabbix's Latest Data view after importing the template and linking two
+hosts (`prod` and `sandbox`):
+
+![Zabbix Latest Data view showing CertiNext prod and sandbox items: DCV expiring within lead time, DCV minimum days left, domains total, and unverified domains](docs/images/zabbix-latest-data.png)
+
+These are live values from our own deployment, not staged demo data.
+
 ## `KEY_*` ↔ template sync
 
 The Zabbix item keys the pusher writes (`KEY_*` constants in
