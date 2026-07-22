@@ -1,0 +1,22 @@
+[Unit]
+Description=Push CertiNext DCV expiry metrics to Zabbix (daily)
+Documentation=https://github.com/tod-uma/certinext-zabbix
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=certinextzbx
+Group=certinextzbx
+EnvironmentFile=/etc/certinext-zabbix/certinext-zabbix.env
+ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14
+# SIGTERM mid-run exits 130 after cleanup; treat an operator stop as success.
+SuccessExitStatus=130
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/tmp
+# WARNING: do NOT set PrivateTmp=yes. The single-instance lock lives in
+# /tmp and must be visible to BOTH this unit and
+# certinext-zabbix-push.service; PrivateTmp would give each unit its own
+# /tmp and defeat the lock.

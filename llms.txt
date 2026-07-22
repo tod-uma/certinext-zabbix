@@ -1,0 +1,54 @@
+# certinext-zabbix
+
+> CertiNext DCV health monitoring for Zabbix: a trapper-only Zabbix
+> template (`templates/template_certinext/7.0/`) plus the
+> `certinext-zabbix-push` typer CLI that feeds it. Public, PyPI-ready
+> (not yet published); a sanitized copy of code that also lives in the
+> UMS-internal `ums-certinext-scripts` repo, which remains canonical
+> until a future migration — see CLAUDE.md.
+
+Start with the [AI-agent quickstart](README.md#ai-agent-quickstart)
+section of the README — install command, credential model, and the rule
+that `certinext-zabbix-push --dry-run` is the safe way to see what a run
+would do.
+
+## Core docs
+
+- [README](README.md): what this is, requirements, install, quickstart
+  (import the template, run the pusher), the `KEY_*` ↔ template sync
+  rule, development commands.
+- [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md): operational facts for
+  coding agents — dev setup, test/lint/type-check commands, CI gotchas,
+  the GitLab-canonical/GitHub-mirror relationship, and the
+  copy-not-canonical status relative to `ums-certinext-scripts`.
+- [Deployment guide](docs/deployment.md): how to run
+  `certinext-zabbix-push` unattended — systemd timer (recommended), cron,
+  and Windows Task Scheduler configurations; environment-variable and
+  flag reference; the one-time Zabbix template import/link/macro setup;
+  network requirements; validation steps; a configuration-management
+  (Ansible) task checklist. **Read this before writing any install/deploy
+  automation for this repo.**
+- [Per-template README](templates/template_certinext/7.0/README.md):
+  stands on its own for the "import the template" story — required
+  macros, the eight trapper items, the sixteen triggers, and an author
+  line, per the Zabbix community-templates conventions.
+- [examples/systemd/](examples/systemd/), [examples/cron/](examples/cron/),
+  [examples/windows/](examples/windows/): ready-to-adapt unit files,
+  cron lines, and Task Scheduler scripts referenced from
+  `docs/deployment.md`. `examples/windows/` is explicitly untested —
+  written by analogy with the systemd/cron examples, not verified
+  against a real Windows host.
+
+## Reference
+
+- [certinext on GitHub](https://github.com/tod-uma/certinext) /
+  [PyPI](https://pypi.org/project/certinext/): the CertiNext API client
+  this pusher drives — its README documents the API surface, credential
+  resolution, and known vendor API quirks; its `certinext healthcheck`
+  CLI ships in the same install and is the standard API-reachability
+  probe.
+- [zabbix-utils](https://pypi.org/project/zabbix-utils/): the trapper
+  Sender protocol library used to push metric values.
+- [Zabbix community-templates guidelines](https://www.zabbix.com/documentation/guidelines/en/thosts/community_templates):
+  the submission-ready layout and MIT-only license requirement this
+  repo's template subtree conforms to (not yet submitted).
