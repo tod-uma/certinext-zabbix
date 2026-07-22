@@ -5,8 +5,10 @@
 `sysadmin/certinext-zabbix` on `gitlab.its.maine.edu` — the University of
 Maine System's internal GitLab instance, not reachable from outside
 UMS's network/VPN. Use it for GitLab CI references, clone URLs, and API
-calls. This is the canonical repo; CI runs here. External contributors
-work against the public GitHub mirror instead (see below).
+calls. This is the canonical repo; merges, issues, and the source of
+truth for content all happen here. External contributors work against
+the public GitHub mirror instead (see below), which also runs its own
+CI (see PyPI section) since GitLab's pipelines are invisible to them.
 
 ## Remotes and the GitHub mirror
 
@@ -68,10 +70,17 @@ someone actually verifying it.
 
 ## PyPI
 
-PyPI-ready but not published (see the root README). Flipping to PyPI
-means: register the `certinext-zabbix` project, add a PyPI API token as a
-CI variable, and add a tag-triggered `twine upload` job — `.gitlab-ci.yml`
-has a commented stub for this.
+PyPI-ready but not published (see the root README). The GitHub mirror
+carries a `.github/workflows/ci.yml` with `publish-pypi`/`release` jobs,
+copied from `certinext`'s pattern: gated to fire only on `v*` tag pushes,
+publishing via **OIDC trusted publishing** (`pypa/gh-action-pypi-publish`,
+`permissions: id-token: write`) — no PyPI token stored on GitHub *or*
+GitLab. Flipping PyPI on is pure pypi.org-side config: register
+`certinext-zabbix` as a project and add a trusted publisher pointing at
+this repo's `ci.yml` workflow + the `pypi` environment. No workflow or
+`.gitlab-ci.yml` changes needed at that point — `.gitlab-ci.yml` has a
+comment explaining this instead of a stub job (GitLab CI publishes
+nothing to PyPI; that's GitHub Actions' job here, matching `certinext`).
 
 ## License
 
