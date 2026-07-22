@@ -1,0 +1,122 @@
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - lint
+  - unit
+  - security
+  - build
+
+variables:
+  http_proxy: "http://proxy.its.maine.edu:3128"
+  https_proxy: "http://proxy.its.maine.edu:3128"
+  no_proxy: "127.0.0.1,localhost,*.maine.edu"
+  PY_COLORS: '1'
+  # Without this, the SAST template's default rules only fire via
+  # $CI_COMMIT_BRANCH on branch pipelines; combined with the workflow dedup
+  # above (which skips the branch pipeline once an MR is open), the `sast`
+  # job would silently run on neither pipeline. See the gitlab-ci skill.
+  AST_ENABLE_MR_PIPELINES: 'true'
+
+# All runtime deps are on public PyPI — no private index, no .netrc.
+.python_setup: &python_setup
+  - pip install uv
+  - uv pip install --system -e .[dev]
+
+lint:
+  stage: lint
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  image: python:3.12-slim
+  script:
+    - *python_setup
+    - ruff check .
+
+typecheck:
+  stage: lint
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  image: python:3.12-slim
+  script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends libatomic1
+    - *python_setup
+    - mypy certinext_zabbix
+    - pyright
+
+unit-test:
+  stage: unit
+  needs: [lint, typecheck]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  image: python:${PYTHON_VERSION}-slim
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.11", "3.12", "3.13", "3.14"]
+  script:
+    - *python_setup
+    - pytest tests/ -v --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+    expire_in: 1 week
+
+sast:
+  stage: security
+  needs: []
+  variables:
+    GIT_DEPTH: 0
+
+semgrep-sast:
+  stage: security
+  needs: []
+  allow_failure: false
+
+secret_detection:
+  stage: security
+  needs: []
+  allow_failure: false
+  variables:
+    GIT_DEPTH: 0
+
+build:
+  stage: build
+  needs: [lint, typecheck, unit-test, semgrep-sast, secret_detection]
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+  image: python:3.12-slim
+  script:
+    - pip install build
+    - python -m build
+
+# Publish to PyPI — not enabled yet (see the PyPI section in CLAUDE.md).
+# To flip this on: register the `certinext-zabbix` project on PyPI, add a
+# PyPI API token as a masked/protected CI variable (e.g. PYPI_API_TOKEN),
+# and add a release stage with a tag-triggered job along these lines:
+#
+# publish:
+#   stage: release
+#   needs: [lint, typecheck, unit-test, semgrep-sast, secret_detection]
+#   rules:
+#     - if: $CI_COMMIT_TAG
+#   image: python:3.12-slim
+#   script:
+#     - pip install build twine
+#     - python -m build
+#     - TWINE_USERNAME=__token__ TWINE_PASSWORD=${PYPI_API_TOKEN} python -m twine upload dist/*

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "certinext-zabbix"
+version = "0.1.0"
+authors = [
+    { name="Tod Detre", email="tod.detre@maine.edu" },
+]
+description = "CertiNext DCV monitoring for Zabbix: import template + trapper pusher"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "certinext>=1.0.0,<2",
+    "filelock",
+    "structlog",
+    "typer>=0.12",
+    "zabbix-utils>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest",
+    "pyright>=1.1",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+certinext-zabbix-push = "certinext_zabbix.zabbix_push_cli:main"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.setuptools.packages]
+find = {}
+
+[tool.pyright]
+include = ["certinext_zabbix", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

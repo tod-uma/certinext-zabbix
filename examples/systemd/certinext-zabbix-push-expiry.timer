@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily certinext-zabbix-push run with DCV expiry metrics
+
+[Timer]
+OnCalendar=03:12
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

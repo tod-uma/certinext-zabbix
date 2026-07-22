@@ -1,0 +1,19 @@
+# /etc/cron.d/certinext-zabbix-push   (mode 0600, owner root:root)
+#
+# crond reads this file as root and runs each job as the named user.
+# No `flock` wrapper needed — the pusher has a built-in, per-job,
+# zero-timeout single-instance lock in $TMPDIR. Prefer systemd where
+# available (see ../systemd/) — journald capture, catch-up on missed
+# runs, and randomized delay come free there.
+#
+# You own the log plumbing with cron: create /var/log/certinext-zabbix/
+# owned by the service user and add a logrotate policy, or pipe stderr to
+# `logger -t certinext-zabbix-push` instead of a file.
+
+CERTINEXT_CLIENT_ID=<account number>
+CERTINEXT_CLIENT_SECRET=<client secret>
+ZABBIX_SERVER=<your zabbix server address>
+ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
+
+*/15 * * * *  certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
+12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 2>>/var/log/certinext-zabbix/push.log

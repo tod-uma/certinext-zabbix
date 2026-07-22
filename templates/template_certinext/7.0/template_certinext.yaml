@@ -1,0 +1,420 @@
+# CertiNext DCV by Zabbix trapper — Zabbix 7.0 import file.
+#
+# Source of truth for the trapper items that `certinext-zabbix-push`
+# (this repo) sends: the item keys here and the KEY_* constants in
+# certinext_zabbix/zabbix_push.py must stay in sync. Every item
+# exists twice, key-parameterized by environment ([prod] / [sandbox]);
+# the pusher derives the parameter from its resolved connection.
+#
+# Everything carries an `env` tag. To mute sandbox notifications, add a
+# condition to the relevant trigger action (Alerts → Actions):
+#   Tag value | env | does not equal | sandbox
+# Sandbox problems still show in the UI — they just never page anyone.
+#
+# Import via Data collection → Templates → Import. See this template's
+# README.md for the manual steps around it (linking the host, scheduling
+# the pusher).
+zabbix_export:
+  version: '7.0'
+  template_groups:
+  - uuid: c97e1e605e9e4e1fa4050b09b1345599
+    name: Templates/Custom
+  templates:
+  - uuid: af6fbfd6e8bf4e50a3ff7156f32b589b
+    template: 'CertiNext DCV by Zabbix trapper'
+    name: 'CertiNext DCV by Zabbix trapper'
+    description: |
+      CertiNext DCV health, pushed by the certinext-zabbix-push CLI from
+      certinext-zabbix (https://github.com/tod-uma/certinext-zabbix).
+
+      All items are trappers — nothing is polled. Items are duplicated
+      per environment via key parameters ([prod] / [sandbox]); the pusher
+      picks the parameter from its CertiNext connection. Two schedules
+      feed each environment: a frequent run (domain totals) and a daily
+      run with --expiry-days (DCV expiry). nodata() triggers catch a dead
+      pusher. DCV expiry alerts escalate through a severity gradient on
+      min_days_left (WARNING 14d → AVERAGE 7d → HIGH 1d → DISASTER
+      lapsed, thresholds in the {$CERTINEXT.DCV.*_DAYS} macros),
+      dependency-chained so only the most severe tier fires.
+
+      Every item and trigger is tagged env:prod or env:sandbox — filter
+      notification actions on that tag to keep sandbox problems silent.
+    groups:
+    - name: Templates/Custom
+    items:
+        # ------------------------------------------------------- prod ---
+    - uuid: 2439f008f9dd42e497dce35d465dd51f
+      name: 'CertiNext prod: Domains total'
+      type: TRAP
+      key: 'certinext.domains.total[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Total domains returned by the CertiNext domain list. Guards
+        against a silently empty list (vendor pagination/search bugs) —
+        unverified=0 alone would look healthy in that failure mode.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: efd506920f934729ba96fa73c3535202
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.domains.total[prod])=0'
+        name: 'CertiNext prod: domain list is empty'
+        priority: WARNING
+        description: |
+          The pusher ran but the CertiNext API returned zero domains.
+          Almost certainly an API-side regression (auth, pagination,
+          search), not a real empty account. Check the pusher logs on
+          the sending host, then `certinext healthcheck`.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: 8a6a729655c647c7832c0810f24f98de
+      name: 'CertiNext prod: Unverified domains'
+      type: TRAP
+      key: 'certinext.domains.unverified[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Domains that are ACTIVE but not DCV-VERIFIED (PENDING or
+        REJECTED). Nonzero is normal briefly while a new domain's DCV
+        challenge propagates through DNS; sustained nonzero means a
+        domain is stuck.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 23f87eb23d5b449eb64c99dcc92d370c
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.domains.unverified[prod],{$CERTINEXT.UNVERIFIED.MAX_AGE})>0'
+        name: 'CertiNext prod: domain(s) unverified too long'
+        opdata: 'unverified: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          At least one domain has been unverified for the whole of
+          {$CERTINEXT.UNVERIFIED.MAX_AGE}. DCV normally completes within
+          an hour; a stuck domain means DNS propagation stalled or
+          CertiNext rejected the DCV challenge. Check your DCV
+          automation's logs and the domain's status in CertiNext to see
+          which domain and step is stuck.
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 77f29a654d6a4872b928bdd3c534c859
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.domains.unverified[prod],{$CERTINEXT.NODATA.FAST})=1'
+        name: 'CertiNext prod: no data from pusher (frequent run)'
+        priority: WARNING
+        description: |
+          No value received for {$CERTINEXT.NODATA.FAST} — the
+          certinext-zabbix-push frequent timer is dead, erroring before
+          the send, or the CertiNext API has been down across several
+          runs. Check the timer and its journal on the sending host.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: ef3133954ca04801b725fca8ef6259e3
+      name: 'CertiNext prod: DCV expiring within lead time'
+      type: TRAP
+      key: 'certinext.dcv.expiring[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Verified domains whose DCV validTill falls within the renewal
+        lead time (the pusher's --expiry-days, including already-lapsed).
+        Your DCV renewal automation should revalidate well before this
+        window, so nonzero here means renewal has silently not been
+        happening for that domain.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 40d21056f218406f862d49e65f897ecb
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.dcv.expiring[prod],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext prod: no data from pusher (daily expiry run)'
+        priority: WARNING
+        description: |
+          No expiry metrics received for {$CERTINEXT.NODATA.DAILY} —
+          the daily --expiry-days timer is dead or a domain-detail
+          refresh kept failing (the pusher deliberately skips the
+          expiry push rather than undercount). Check the timer journal
+          on the sending host.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: ebb96d02f32641eb8b02482fb3e975a7
+      name: 'CertiNext prod: DCV minimum days left'
+      type: TRAP
+      key: 'certinext.dcv.min_days_left[prod]'
+      delay: '0'
+      value_type: FLOAT
+      units: days
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days until the soonest DCV expiry across all verified domains
+        (negative once lapsed). Carries the severity-gradient triggers
+        (the thresholds are the {$CERTINEXT.DCV.*_DAYS} macros); the
+        expiring-count item shows how many domains are in the window.
+        Only updated by the daily --expiry-days run, so tier changes are
+        detected at daily resolution. Absent when no verified domain
+        reports a validTill.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 4dbfc3e2b4a04f5aad75fe0141ccbb55
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.DISASTER_DAYS}'
+        name: 'CertiNext prod: DCV lapsed'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: DISASTER
+        description: |
+          A domain's DCV validity has run out — certificate
+          issuance/renewal for that domain (and its subdomains) is
+          failing NOW. Identify the domain with `certinext-zabbix-push
+          --dry-run --expiry-days 14 -v`, then revalidate/renew its DCV
+          via CertiNext.
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 3f5143b645b7453b87ff62effa038e0e
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.HIGH_DAYS}'
+        name: 'CertiNext prod: DCV expires within {$CERTINEXT.DCV.HIGH_DAYS} day(s)'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: HIGH
+        description: |
+          A domain's DCV expires within {$CERTINEXT.DCV.HIGH_DAYS}
+          day(s) and renewal has not happened. Last chance before
+          issuance for that domain starts failing — renew today.
+        dependencies:
+        - name: 'CertiNext prod: DCV lapsed'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.DISASTER_DAYS}'
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 0d327d76b2c54e4fa8f07f867b15249a
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.AVG_DAYS}'
+        name: 'CertiNext prod: DCV expires within {$CERTINEXT.DCV.AVG_DAYS} days'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          A domain's DCV expires within {$CERTINEXT.DCV.AVG_DAYS} days
+          and renewal has not happened. Your renewal automation should
+          have caught this at 30 days out — find out why it has not.
+        dependencies:
+        - name: 'CertiNext prod: DCV expires within {$CERTINEXT.DCV.HIGH_DAYS} day(s)'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.HIGH_DAYS}'
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 812c4ee6e33543caa746d4da5cb1e75f
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.WARN_DAYS}'
+        name: 'CertiNext prod: DCV expires within {$CERTINEXT.DCV.WARN_DAYS} days'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          A domain's DCV expires within {$CERTINEXT.DCV.WARN_DAYS} days
+          without renewal — renewal is roughly two weeks overdue (your
+          renewal automation should typically catch this at 30 days
+          out). Investigate before it escalates.
+        dependencies:
+        - name: 'CertiNext prod: DCV expires within {$CERTINEXT.DCV.AVG_DAYS} days'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[prod])<={$CERTINEXT.DCV.AVG_DAYS}'
+        tags:
+        - tag: env
+          value: prod
+        # ---------------------------------------------------- sandbox ---
+        # Mirror of the prod items/triggers with the [sandbox] key
+        # parameter and env:sandbox tags. Same severities — mute the
+        # notifications via the action tag condition, not by weakening the
+        # triggers (the UI signal stays honest during sandbox testing).
+    - uuid: f9d18dfe1d95464aad6dca5f23661fe9
+      name: 'CertiNext sandbox: Domains total'
+      type: TRAP
+      key: 'certinext.domains.total[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Total domains returned by the CertiNext sandbox domain list.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 73b5238f46fc4c4da0498a1d0409efb9
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.domains.total[sandbox])=0'
+        name: 'CertiNext sandbox: domain list is empty'
+        priority: WARNING
+        description: |
+          The sandbox pusher ran but the CertiNext sandbox API
+          returned zero domains — likely an API-side regression (auth,
+          pagination, search), not a real empty account.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: c9594c8f52074f718ac2a320ed0587fe
+      name: 'CertiNext sandbox: Unverified domains'
+      type: TRAP
+      key: 'certinext.domains.unverified[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox domains that are ACTIVE but not DCV-VERIFIED. Expect
+        this to be nonzero during deliberate sandbox testing.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 2c99e1b418974d05a563d008e9b1c3aa
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.domains.unverified[sandbox],{$CERTINEXT.UNVERIFIED.MAX_AGE})>0'
+        name: 'CertiNext sandbox: domain(s) unverified too long'
+        opdata: 'unverified: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          Sandbox domain(s) unverified for the whole of
+          {$CERTINEXT.UNVERIFIED.MAX_AGE}. Often a deliberate test
+          state — notifications for env:sandbox should be muted at
+          the action level.
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: 534d879f40994e84a4399d0c513e8671
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.domains.unverified[sandbox],{$CERTINEXT.NODATA.FAST})=1'
+        name: 'CertiNext sandbox: no data from pusher (frequent run)'
+        status: DISABLED
+        priority: WARNING
+        description: |
+          No sandbox value received for {$CERTINEXT.NODATA.FAST}.
+          Ships DISABLED because nodata() fires even for items that
+          have never received data — enable this trigger once a
+          sandbox frequent run is actually scheduled.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: b94825912b63445fbd622c60c447fa64
+      name: 'CertiNext sandbox: DCV expiring within lead time'
+      type: TRAP
+      key: 'certinext.dcv.expiring[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox verified domains whose DCV validTill falls within the
+        renewal lead time (the pusher's --expiry-days).
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 703cd52541164a50aaee49c472070d75
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.dcv.expiring[sandbox],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext sandbox: no data from pusher (daily expiry run)'
+        status: DISABLED
+        priority: WARNING
+        description: |
+          No sandbox expiry metrics received for
+          {$CERTINEXT.NODATA.DAILY}. Ships DISABLED because nodata()
+          fires even for items that have never received data — enable
+          this trigger once a sandbox daily run is actually scheduled.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: 360cb663103b4fb8853fcfad644e31ad
+      name: 'CertiNext sandbox: DCV minimum days left'
+      type: TRAP
+      key: 'certinext.dcv.min_days_left[sandbox]'
+      delay: '0'
+      value_type: FLOAT
+      units: days
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days until the soonest sandbox DCV expiry (negative once
+        lapsed). Same gradient triggers as prod, tagged env:sandbox.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 6b439982791748c0a7bb6b03177fd502
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.DISASTER_DAYS}'
+        name: 'CertiNext sandbox: DCV lapsed'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: DISASTER
+        description: |
+          A sandbox domain's DCV validity has run out. Frequently a
+          deliberate test state (e.g. reinitiate/expiry experiments) —
+          notifications for env:sandbox should be muted at the action
+          level.
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: 6452a2d8521347b98627b5ea40f79143
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.HIGH_DAYS}'
+        name: 'CertiNext sandbox: DCV expires within {$CERTINEXT.DCV.HIGH_DAYS} day(s)'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: HIGH
+        description: |
+          A sandbox domain's DCV expires within
+          {$CERTINEXT.DCV.HIGH_DAYS} day(s) without renewal.
+        dependencies:
+        - name: 'CertiNext sandbox: DCV lapsed'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.DISASTER_DAYS}'
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: 0bad34b933a545f5a98f96d3a05edeb8
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.AVG_DAYS}'
+        name: 'CertiNext sandbox: DCV expires within {$CERTINEXT.DCV.AVG_DAYS} days'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          A sandbox domain's DCV expires within
+          {$CERTINEXT.DCV.AVG_DAYS} days without renewal.
+        dependencies:
+        - name: 'CertiNext sandbox: DCV expires within {$CERTINEXT.DCV.HIGH_DAYS} day(s)'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.HIGH_DAYS}'
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: a6c9d283dfa64ac7963e598b7dbd4b32
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.WARN_DAYS}'
+        name: 'CertiNext sandbox: DCV expires within {$CERTINEXT.DCV.WARN_DAYS} days'
+        opdata: 'min days left: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          A sandbox domain's DCV expires within
+          {$CERTINEXT.DCV.WARN_DAYS} days without renewal.
+        dependencies:
+        - name: 'CertiNext sandbox: DCV expires within {$CERTINEXT.DCV.AVG_DAYS} days'
+          expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left[sandbox])<={$CERTINEXT.DCV.AVG_DAYS}'
+        tags:
+        - tag: env
+          value: sandbox
+    macros:
+    - macro: '{$CERTINEXT.DCV.AVG_DAYS}'
+      value: '7'
+      description: 'AVERAGE severity when the soonest DCV expiry is within this many days'
+    - macro: '{$CERTINEXT.DCV.DISASTER_DAYS}'
+      value: '0'
+      description: 'DISASTER severity when the soonest DCV expiry is at/below this many days (lapsed)'
+    - macro: '{$CERTINEXT.DCV.HIGH_DAYS}'
+      value: '1'
+      description: 'HIGH severity when the soonest DCV expiry is within this many days'
+    - macro: '{$CERTINEXT.DCV.WARN_DAYS}'
+      value: '14'
+      description: 'WARNING severity when the soonest DCV expiry is within this many days'
+    - macro: '{$CERTINEXT.NODATA.DAILY}'
+      value: 26h
+      description: 'nodata() window for the daily expiry items — one missed daily run alerts'
+    - macro: '{$CERTINEXT.NODATA.FAST}'
+      value: 1h
+      description: 'nodata() window for the frequent items — four missed 15-minute runs alert'
+    - macro: '{$CERTINEXT.SENDER.ALLOWED}'
+      value: 127.0.0.1
+      description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'
+    - macro: '{$CERTINEXT.UNVERIFIED.MAX_AGE}'
+      value: 1h
+      description: 'How long unverified domains must persist before alerting'
