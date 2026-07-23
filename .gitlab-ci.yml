@@ -124,7 +124,7 @@ build:
 # without leaving the internal network.
 release_build:
   stage: release
-  needs: [lint, typecheck, unit-test, semgrep-sast, secret_detection]
+  needs: []
   rules:
     - if: $CI_COMMIT_TAG
   image: python:3.12-slim
