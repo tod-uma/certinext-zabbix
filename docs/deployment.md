@@ -29,9 +29,13 @@ A task checklist for automation is at the
 - **Logging:** everything goes to **stderr**; **stdout carries one JSON
   object** with the pushed metrics
   (`{"env": ..., "zabbix_host": ..., "sent": ..., "metrics": {...}}`).
-  When stderr is not a TTY (systemd, cron), log output is one JSON object
-  per line with UTC ISO timestamps and a per-run `correlation_id` + `pid`
-  on every line — ready for journald or a log aggregator.
+  When stderr is not a TTY (systemd, cron), log output is one `key=value`
+  (logfmt) line per event with UTC ISO timestamps and a per-run
+  `correlation_id` + `pid` on every line — ready for journald or a log
+  aggregator (Splunk and friends auto-extract `key=value` pairs with no
+  per-sourcetype configuration, unlike JSON, which only gets that treatment
+  if the *entire* line is valid JSON). Pass `--log-format json` to restore
+  the old one-JSON-object-per-line format instead.
 - **Credentials are fail-fast:** a missing `CERTINEXT_CLIENT_ID`/
   `CERTINEXT_CLIENT_SECRET` or `--zabbix-server`/`ZABBIX_SERVER` raises an
   error and exits 1 immediately.
@@ -126,7 +130,8 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call per verified domain — schedule this on a daily run, not every 15 minutes). Disabled by default. |
 | `--zabbix-server` / `--zabbix-port` / `--zabbix-host` / `--zabbix-timeout` | Override the matching environment variables above. |
 | `--sandbox` | Use the CertiNext **sandbox** API — see [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too). |
-| `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; JSON logs are complete at default verbosity. |
+| `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; logs are complete at default verbosity. |
+| `--log-format json` | Emit one JSON object per line instead of the default logfmt (`key=value`) lines. |
 
 Full flag list: `/opt/certinext-zabbix/bin/certinext-zabbix-push --help`.
 
@@ -247,7 +252,7 @@ systemctl daemon-reload
 systemctl enable --now certinext-zabbix-push.timer certinext-zabbix-push-expiry.timer
 ```
 
-Logs land in the journal as JSON lines; every line of one run shares a
+Logs land in the journal as logfmt (`key=value`) lines; every line of one run shares a
 `correlation_id`:
 
 ```bash

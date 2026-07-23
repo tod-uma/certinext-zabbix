@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import typer
-from certinext.cli_support import setup_logging
+from certinext.cli_support import LogFormat, setup_logging
 from filelock import FileLock
 
 _TRACEBACK_HINT = "re-run with -vvv for the full traceback"
@@ -39,20 +39,23 @@ VersionOption = Annotated[bool, typer.Option(
 )]
 
 
-def configure_logging(verbose: int) -> None:
+def configure_logging(verbose: int, log_format: LogFormat = LogFormat.LOGFMT) -> None:
     """Configure structlog/stdlib logging with this package's run context.
 
     Delegates to :func:`certinext.cli_support.setup_logging`: correlation_id
-    and pid keep a stable field order in JSON (cron) output and are hidden
-    from interactive output at verbosity 0; filelock joins the third-party
-    loggers quieted below ``-vvvv``.
+    and pid keep a stable field order in non-interactive output and are
+    hidden from interactive output at verbosity 0; filelock joins the
+    third-party loggers quieted below ``-vvvv``.
 
     Args:
         verbose: Verbosity count from -v flags (0=INFO, 3+=DEBUG,
             4+=third-party DEBUG).
+        log_format: Non-interactive (cron/redirected) log line format — see
+            :class:`certinext.cli_support.LogFormat`. Ignored on a TTY.
     """
     setup_logging(
         verbose,
+        log_format=log_format,
         extra_priority_keys=("correlation_id", "pid"),
         console_quiet_keys=("correlation_id", "pid"),
         quiet_loggers=("filelock",),
