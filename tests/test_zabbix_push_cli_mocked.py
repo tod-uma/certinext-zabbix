@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
+from certinext.cli_support import LogFormat
 from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
@@ -121,7 +122,7 @@ class TestCliSupportContract:
 
     def test_verbose_count_reaches_configure_logging(self) -> None:
         _, mocks = _run(argv=["-vvv"])
-        mocks.logging.assert_called_once_with(3)
+        mocks.logging.assert_called_once_with(3, LogFormat.LOGFMT)
 
 
 class TestZabbixDestination:

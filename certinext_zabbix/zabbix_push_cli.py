@@ -45,12 +45,13 @@ from certinext.cli_options import (
     AccountNumberOption,
     BaseUrlOption,
     ClientSecretOption,
+    LogFormatOption,
     ProfileOption,
     SandboxOption,
     TokenUrlOption,
     VerboseOption,
 )
-from certinext.cli_support import build_session, resolve_connection
+from certinext.cli_support import LogFormat, build_session, resolve_connection
 from certinext.exceptions import CertiNextAPIError
 from filelock import FileLock, Timeout
 from zabbix_utils.exceptions import ProcessingError
@@ -88,6 +89,7 @@ def run(
     )] = False,
     version_: VersionOption = False,
     verbose: VerboseOption = 0,
+    log_format: LogFormatOption = LogFormat.LOGFMT,
     # CertiNext connection
     profile: ProfileOption = None,
     sandbox: SandboxOption = False,
@@ -143,7 +145,7 @@ def run(
     resolved_host = zabbix_host or ""
     lock: Optional[FileLock] = None
     try:
-        configure_logging(verbose)
+        configure_logging(verbose, log_format)
 
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(correlation_id=correlation_id)
