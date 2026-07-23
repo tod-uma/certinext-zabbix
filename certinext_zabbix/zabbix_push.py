@@ -22,8 +22,12 @@ Two metric families, matching the two designed checks:
 import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 
+import httpx
 import structlog
+from certinext import filter_needs_dcv
+from certinext.exceptions import CertiNextAPIError
 from certinext.models.domains import Domain
 from zabbix_utils import ItemValue, Sender
 from zabbix_utils.exceptions import ProcessingError
@@ -40,6 +44,78 @@ ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
 
 _SECONDS_PER_DAY = 86400
+
+
+class DomainScope(str, Enum):
+    """Which domains a run should operate on.
+
+    See :func:`scope_domains` for the semantics of each member.
+    """
+
+    TOP = "top"
+    NS_BOUNDARY = "ns-boundary"
+    ALL = "all"
+
+
+def scope_domains(domains: Sequence[Domain], scope: DomainScope) -> list[Domain]:
+    """Filter *domains* down to the set a given scope should monitor.
+
+    Reuses :func:`certinext.filter_needs_dcv` — the same account-hierarchy
+    filter ``certinext-top-domains``/``dcv-update`` already rely on — rather
+    than a new domain-parsing implementation. See
+    ``docs/adr/0007-domain-scope-reuses-filter-needs-dcv.md`` for why.
+
+    Args:
+        domains: Domains as returned by the CertiNext list endpoint.
+        scope: :data:`DomainScope.TOP` excludes any domain with a registered
+            ancestor in *domains* (pure string-suffix match, no DNS).
+            :data:`DomainScope.NS_BOUNDARY` does the same but re-includes a
+            domain that has its own NS records (a real DNS zone cut), even
+            when a registered ancestor exists. :data:`DomainScope.ALL`
+            returns *domains* unchanged.
+
+    Returns:
+        The filtered domain list (or *domains* unchanged for
+        :data:`DomainScope.ALL`).
+    """
+    if scope is DomainScope.ALL:
+        return list(domains)
+    all_names = {d.name for d in domains if d.name}
+    return filter_needs_dcv(list(domains), all_names, check_ns=(scope is DomainScope.NS_BOUNDARY))
+
+
+def refresh_domain(d: Domain, *, attempts: int = 3, retry_delay: float = 5.0) -> None:
+    """Refresh one domain's detail, retrying a transient API failure.
+
+    Mirrors :func:`push_metrics`'s retry idiom: a single flaky domain
+    (timeout, rate limit, transient API error) shouldn't abort an entire
+    run's expiry check. Only the same exception types already treated as an
+    expected, well-typed failure mode by the caller are retried — a bare
+    ``Exception`` is not a documented failure mode of ``Domain.refresh()``
+    and is re-raised immediately, unchanged from before this function
+    existed.
+
+    Args:
+        d: The domain to refresh in place.
+        attempts: Total tries (>= 1) before the exception is re-raised.
+        retry_delay: Seconds to wait between tries.
+
+    Raises:
+        CertiNextAPIError: On the final attempt, if every retry also failed.
+        httpx.HTTPError: Same, for a transport-level failure.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            d.refresh()
+            return
+        except (CertiNextAPIError, httpx.HTTPError):
+            if attempt >= attempts:
+                raise
+            log.warning(
+                "Domain refresh failed — retrying",
+                domain=d.name, attempt=attempt, attempts=attempts, retry_delay=retry_delay,
+            )
+            time.sleep(retry_delay)
 
 
 def item_key(base: str, env: str) -> str:

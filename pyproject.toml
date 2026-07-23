@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "certinext>=1.1.0rc1,<2",
+    "dnspython",
     "filelock",
     "structlog",
     "typer>=0.12",

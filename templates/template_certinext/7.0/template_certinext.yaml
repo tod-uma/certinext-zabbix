@@ -51,9 +51,13 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Total domains returned by the CertiNext domain list. Guards
-        against a silently empty list (vendor pagination/search bugs) —
+        Total domains returned by the CertiNext domain list, after
+        --domain-scope filtering (default: top-level only — see
+        --domain-scope in the pusher's --help). Guards against a
+        silently empty list (vendor pagination/search bugs) —
         unverified=0 alone would look healthy in that failure mode.
+        Upgrading to a --domain-scope other than "all" causes a
+        one-time drop in this graph — expected, not data loss.
       tags:
       - tag: env
         value: prod
@@ -79,7 +83,8 @@ zabbix_export:
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
         Domains that are ACTIVE but not DCV-VERIFIED (PENDING or
-        REJECTED). Nonzero is normal briefly while a new domain's DCV
+        REJECTED), after --domain-scope filtering (default: top-level
+        only). Nonzero is normal briefly while a new domain's DCV
         challenge propagates through DNS; sustained nonzero means a
         domain is stuck.
       tags:
@@ -121,7 +126,8 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Verified domains whose DCV validTill falls within the renewal
+        Verified domains (after --domain-scope filtering, default:
+        top-level only) whose DCV validTill falls within the renewal
         lead time (the pusher's --expiry-days, including already-lapsed).
         Your DCV renewal automation should revalidate well before this
         window, so nonzero here means renewal has silently not been
@@ -155,12 +161,13 @@ zabbix_export:
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
         Days until the soonest DCV expiry across all verified domains
-        (negative once lapsed). Carries the severity-gradient triggers
-        (the thresholds are the {$CERTINEXT.DCV.*_DAYS} macros); the
-        expiring-count item shows how many domains are in the window.
-        Only updated by the daily --expiry-days run, so tier changes are
-        detected at daily resolution. Absent when no verified domain
-        reports a validTill.
+        in scope (after --domain-scope filtering, default: top-level
+        only; negative once lapsed). Carries the severity-gradient
+        triggers (the thresholds are the {$CERTINEXT.DCV.*_DAYS}
+        macros); the expiring-count item shows how many domains are in
+        the window. Only updated by the daily --expiry-days run, so
+        tier changes are detected at daily resolution. Absent when no
+        verified domain reports a validTill.
       tags:
       - tag: env
         value: prod
@@ -238,7 +245,10 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Total domains returned by the CertiNext sandbox domain list.
+        Total domains returned by the CertiNext sandbox domain list,
+        after --domain-scope filtering (default: top-level only).
+        Upgrading to a --domain-scope other than "all" causes a
+        one-time drop in this graph — expected, not data loss.
       tags:
       - tag: env
         value: sandbox
@@ -262,7 +272,8 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Sandbox domains that are ACTIVE but not DCV-VERIFIED. Expect
+        Sandbox domains that are ACTIVE but not DCV-VERIFIED, after
+        --domain-scope filtering (default: top-level only). Expect
         this to be nonzero during deliberate sandbox testing.
       tags:
       - tag: env
@@ -302,7 +313,8 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Sandbox verified domains whose DCV validTill falls within the
+        Sandbox verified domains (after --domain-scope filtering,
+        default: top-level only) whose DCV validTill falls within the
         renewal lead time (the pusher's --expiry-days).
       tags:
       - tag: env
@@ -332,8 +344,10 @@ zabbix_export:
       trends: 730d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Days until the soonest sandbox DCV expiry (negative once
-        lapsed). Same gradient triggers as prod, tagged env:sandbox.
+        Days until the soonest sandbox DCV expiry in scope (after
+        --domain-scope filtering, default: top-level only; negative
+        once lapsed). Same gradient triggers as prod, tagged
+        env:sandbox.
       tags:
       - tag: env
         value: sandbox
