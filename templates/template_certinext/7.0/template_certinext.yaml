@@ -424,11 +424,11 @@ zabbix_export:
       value: 26h
       description: 'nodata() window for the daily expiry items — one missed daily run alerts'
     - macro: '{$CERTINEXT.NODATA.FAST}'
-      value: 1h
-      description: 'nodata() window for the frequent items — four missed 15-minute runs alert'
+      value: 13h
+      description: 'nodata() window for the frequent items — one missed 6-hour run tolerated, two alert'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'
     - macro: '{$CERTINEXT.UNVERIFIED.MAX_AGE}'
-      value: 1h
-      description: 'How long unverified domains must persist before alerting'
+      value: 7h
+      description: 'How long unverified domains must persist before alerting (just over one 6-hour run cycle)'
