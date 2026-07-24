@@ -61,17 +61,6 @@ conftest.
   `_cli_shared.configure_logging()` — do not configure structlog/stdlib
   logging anywhere else.
 
-## Copy-not-canonical
-
-This repo is a sanitized copy of code that also lives in
-`ums-certinext-scripts` — a University of Maine System (UMS) internal
-repository, **not publicly accessible** — which remains the canonical
-source UMS deploys from until a future, effort-gated migration. Two
-sources of truth exist for the push logic, the template, and the `KEY_*`
-constants in the interim — see [CLAUDE.md](CLAUDE.md) for the full
-explanation. Don't assume a change here is mirrored there, or vice
-versa.
-
 ## GitLab project path
 
 `sysadmin/certinext-zabbix` on `gitlab.its.maine.edu` — UMS's internal

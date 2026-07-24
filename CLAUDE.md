@@ -19,20 +19,6 @@ public, no-login-required face for InCommon/higher-ed users, configured
 in GitLab under *Settings → Repository → Mirroring repositories*. Push
 to `gitlab`; never push directly to GitHub.
 
-## Copy-not-canonical (until Phase 6)
-
-This repo is a **sanitized copy** of the pusher + template that still
-live in `ums-certinext-scripts` (`sysadmin/ums-certinext-scripts`, UMS-
-internal, not publicly accessible). `ums-certinext-scripts` runs
-production unchanged and remains the source UMS actually deploys from.
-Until a future, effort-gated Phase 6 makes this repo canonical (see
-`docs/plans/certinext-zabbix-extraction.md` in the `sysadmin-ansible`
-superproject where this repo originated), **two sources of truth exist**
-for the push logic, the template, and the `KEY_*` item-key constants —
-changes made in one place do not automatically propagate to the other.
-Do not assume a fix here is also live in `ums-certinext-scripts`, or vice
-versa.
-
 ## `KEY_*` ↔ template sync
 
 The `KEY_*` constants in `certinext_zabbix/zabbix_push.py` (e.g.

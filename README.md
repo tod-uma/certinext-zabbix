@@ -25,10 +25,7 @@ whole README:
 - **Importing the Zabbix template?** See
   [templates/template_certinext/7.0/README.md](templates/template_certinext/7.0/README.md)
   for macros, metrics, and triggers — it stands on its own.
-- **Working on the code?** Dev setup, test/lint/type-check commands, and
-  the copy-not-canonical relationship with `ums-certinext-scripts` (a
-  University of Maine System internal repository — not publicly
-  accessible, mentioned only for provenance) are in
+- **Working on the code?** Dev setup, test/lint/type-check commands are in
   [CLAUDE.md](CLAUDE.md)/[AGENTS.md](AGENTS.md); a map of all docs is in
   [llms.txt](llms.txt).
 - **Why was X built this way?** See [docs/adr/](docs/adr/) for accepted
