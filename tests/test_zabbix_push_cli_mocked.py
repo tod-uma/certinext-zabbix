@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
 from certinext_zabbix._cli_shared import run_lock
+from certinext_zabbix.zabbix_push import DomainScope
 from certinext_zabbix.zabbix_push_cli import app
 
 runner = CliRunner()
@@ -49,6 +50,10 @@ def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
     )
     # `name` is a reserved MagicMock constructor kwarg — set the attribute directly.
     domain.name = name
+    # No covering ancestor by default, so the default (top) --domain-scope
+    # keeps this domain instead of silently filtering it out via
+    # certinext.filter_needs_dcv's dcv_covering_parent() check.
+    domain.dcv_covering_parent.return_value = None
     return domain
 
 
@@ -335,6 +340,55 @@ class TestZabbixUnreachable:
             event, exc_info=True, server=_DEFAULT_TEST_SERVER, port=10051,
         )
         mock_log.exception.assert_not_called()
+
+
+class TestDomainScope:
+    """--domain-scope must reach scope_domains and gate what gets counted."""
+
+    def test_default_domain_scope_reaches_scope_domains(self) -> None:
+        raw = [_verified_domain("a.edu")]
+        with patch("certinext_zabbix.zabbix_push_cli.scope_domains",
+                   return_value=[]) as mock_scope:
+            result, _mocks = _run(domains=raw)
+        assert result.exit_code == 0
+        mock_scope.assert_called_once_with(raw, DomainScope.TOP)
+
+    def test_domain_scope_flag_forwarded(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.scope_domains",
+                   return_value=[]) as mock_scope:
+            _run(argv=["--domain-scope", "ns-boundary"])
+        assert mock_scope.call_args.args[1] == DomainScope.NS_BOUNDARY
+
+    def test_domain_scope_envvar_forwarded(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.scope_domains",
+                   return_value=[]) as mock_scope:
+            _run(env={"CERTINEXT_DOMAIN_SCOPE": "all"})
+        assert mock_scope.call_args.args[1] == DomainScope.ALL
+
+    def test_scoped_count_used_in_metrics(self) -> None:
+        # scope_domains trims 3 domains down to 1 — metrics must reflect the
+        # scoped list, not the raw listing, for all four metrics.
+        raw = [_verified_domain("a.edu"), _verified_domain("b.edu"), _verified_domain("c.edu")]
+        with patch("certinext_zabbix.zabbix_push_cli.scope_domains",
+                   return_value=[raw[0]]) as mock_scope:
+            result, mocks = _run(domains=raw)
+        assert result.exit_code == 0
+        mock_scope.assert_called_once_with(raw, mock_scope.call_args.args[1])
+        (metrics,) = mocks.push.call_args.args
+        assert metrics["certinext.domains.total[prod]"] == 1
+
+    def test_expiry_refresh_retries_transient_failure(self) -> None:
+        # Proves the CLI calls refresh_domain (which retries), not a bare
+        # d.refresh() — a single ReadTimeout must not fail the run.
+        flaky = _verified_domain("flaky.edu", expires=datetime.now(timezone.utc))
+        flaky.refresh.side_effect = [httpx.ReadTimeout("timed out"), None]
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            result, mocks = _run(argv=["--expiry-days", "14"], domains=[flaky])
+        assert result.exit_code == 0
+        assert flaky.refresh.call_count == 2
+        mock_sleep.assert_called_once_with(5.0)
+        (metrics,) = mocks.push.call_args.args
+        assert "certinext.dcv.expiring[prod]" in metrics
 
 
 class TestLockScoping:

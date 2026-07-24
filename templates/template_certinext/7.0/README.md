@@ -36,7 +36,9 @@ so a single Zabbix host can monitor both without collision.
 5. **Schedule the pusher**: a frequent run (domain-list metrics; every
    15 minutes is typical) and a daily run with `--expiry-days` (DCV expiry
    metrics). See the root repo's `docs/deployment.md` for systemd/cron
-   examples.
+   examples. By default the pusher only monitors top-level domains
+   (`--domain-scope top`) — see the note under [Metrics](#metrics-items)
+   below.
 6. **(Optional) mute sandbox notifications** — every item/trigger is tagged
    `env:prod` or `env:sandbox`. Add a condition to your alerting action
    (*Alerts → Actions*): `Tag value | env | does not equal | sandbox`.
@@ -61,14 +63,23 @@ Each exists twice — `[prod]` and `[sandbox]` — via the Zabbix key parameter.
 
 | Key | Type | Description |
 |---|---|---|
-| `certinext.domains.total[<env>]` | Unsigned | Total domains returned by the CertiNext domain list. |
-| `certinext.domains.unverified[<env>]` | Unsigned | Domains that are ACTIVE but not DCV-VERIFIED (PENDING/REJECTED). |
-| `certinext.dcv.expiring[<env>]` | Unsigned | Verified domains whose DCV expires within the pusher's `--expiry-days` lead time. |
-| `certinext.dcv.min_days_left[<env>]` | Float (days) | Days until the soonest DCV expiry across all verified domains; negative once lapsed. |
+| `certinext.domains.total[<env>]` | Unsigned | Total domains returned by the CertiNext domain list, after `--domain-scope` filtering. |
+| `certinext.domains.unverified[<env>]` | Unsigned | Domains that are ACTIVE but not DCV-VERIFIED (PENDING/REJECTED), after `--domain-scope` filtering. |
+| `certinext.dcv.expiring[<env>]` | Unsigned | Verified domains in scope whose DCV expires within the pusher's `--expiry-days` lead time. |
+| `certinext.dcv.min_days_left[<env>]` | Float (days) | Days until the soonest DCV expiry across all verified domains in scope; negative once lapsed. |
 
 The domain-list metrics (`total`, `unverified`) are pushed every frequent
 run; the expiry metrics (`expiring`, `min_days_left`) are pushed only by the
 daily run (the one invoked with `--expiry-days`).
+
+**`--domain-scope` gates all four metrics above**, not just the expiry
+pair. The default, `top`, excludes any domain with a registered ancestor in
+the account (e.g. skips `dept.example.edu` when `example.edu` is also
+registered) — no DNS lookups. `ns-boundary` does the same but re-includes a
+domain that has its own NS records (a real DNS zone cut). `all` restores
+the pre-`--domain-scope` unfiltered behavior. Switching away from `all`
+causes a one-time drop in `certinext.domains.total` the first time it
+ships — expected, not a monitoring fault.
 
 ## Triggers
 

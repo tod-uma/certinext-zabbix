@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from certinext.exceptions import CertiNextAPIError
 from certinext.models.domains import Domain
 from zabbix_utils.exceptions import ProcessingError
 
@@ -20,10 +22,13 @@ from certinext_zabbix.zabbix_push import (
     KEY_MIN_DAYS_LEFT,
     KEY_TOTAL,
     KEY_UNVERIFIED,
+    DomainScope,
     collect_domain_metrics,
     collect_expiry_metrics,
     item_key,
     push_metrics,
+    refresh_domain,
+    scope_domains,
     verified_domains,
 )
 
@@ -234,4 +239,71 @@ class TestPushMetricsRetry:
             )
         assert result is response
         assert mock_sender.send.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+class TestScopeDomains:
+    """The three --domain-scope modes over a small apex/subdomain tree."""
+
+    def test_all_returns_domains_unchanged(self) -> None:
+        domains = [_domain("example.edu"), _domain("dept.example.edu")]
+        assert scope_domains(domains, DomainScope.ALL) == domains
+
+    def test_top_excludes_registered_subdomain(self) -> None:
+        apex = _domain("example.edu")
+        sub = _domain("dept.example.edu")
+        assert scope_domains([apex, sub], DomainScope.TOP) == [apex]
+
+    def test_top_keeps_domain_with_no_registered_ancestor(self) -> None:
+        unrelated = _domain("otherschool.edu")
+        apex = _domain("example.edu")
+        result = scope_domains([apex, unrelated], DomainScope.TOP)
+        assert result == [apex, unrelated]
+
+    def test_ns_boundary_reincludes_zone_cut_subdomain(self) -> None:
+        apex = _domain("example.edu")
+        zone_cut_sub = _domain("dept.example.edu")
+        with patch(
+            "certinext.models.domains._has_ns_records",
+            side_effect=lambda name: name == "dept.example.edu",
+        ):
+            result = scope_domains([apex, zone_cut_sub], DomainScope.NS_BOUNDARY)
+        assert result == [apex, zone_cut_sub]
+
+    def test_ns_boundary_still_excludes_plain_subdomain(self) -> None:
+        apex = _domain("example.edu")
+        plain_sub = _domain("dept.example.edu")
+        with patch("certinext.models.domains._has_ns_records", return_value=False):
+            result = scope_domains([apex, plain_sub], DomainScope.NS_BOUNDARY)
+        assert result == [apex]
+
+
+class TestRefreshDomain:
+    """Retry-once idiom mirroring push_metrics, scoped to one domain refresh."""
+
+    def test_succeeds_on_second_attempt(self) -> None:
+        d = MagicMock(name="flaky.edu")
+        d.refresh.side_effect = [httpx.ReadTimeout("timed out"), None]
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            refresh_domain(d)
+        assert d.refresh.call_count == 2
+        mock_sleep.assert_called_once_with(5.0)
+
+    def test_exhausts_attempts_and_raises(self) -> None:
+        d = MagicMock(name="down.edu")
+        exc = CertiNextAPIError(503, "service unavailable")
+        d.refresh.side_effect = exc
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep, \
+             pytest.raises(CertiNextAPIError):
+            refresh_domain(d, attempts=3, retry_delay=0.1)
+        assert d.refresh.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_non_retryable_exception_raises_immediately(self) -> None:
+        d = MagicMock(name="weird.edu")
+        d.refresh.side_effect = ValueError("unparseable response")
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep, \
+             pytest.raises(ValueError, match="unparseable response"):
+            refresh_domain(d)
+        assert d.refresh.call_count == 1
         mock_sleep.assert_not_called()

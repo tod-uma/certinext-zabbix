@@ -70,10 +70,13 @@ from .zabbix_push import (
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
     KEY_UNVERIFIED,
+    DomainScope,
     collect_domain_metrics,
     collect_expiry_metrics,
     item_key,
     push_metrics,
+    refresh_domain,
+    scope_domains,
     verified_domains,
 )
 
@@ -97,6 +100,19 @@ def run(
     token_url: TokenUrlOption = None,
     account_number: AccountNumberOption = None,
     client_secret: ClientSecretOption = None,
+    # Domain scope
+    domain_scope: Annotated[DomainScope, typer.Option(
+        "--domain-scope", envvar="CERTINEXT_DOMAIN_SCOPE",
+        help=(
+            "Which domains to monitor. 'top' (default) excludes any domain with a "
+            "registered ancestor in the account (e.g. skips dept.example.edu when "
+            "example.edu is also registered) — no DNS lookups. 'ns-boundary' does the "
+            "same but re-includes a domain that has its own NS records (a real DNS "
+            "zone cut). 'all' monitors every domain, the old unfiltered behavior. "
+            "Applies to all four metrics, not just the expiry pair — switching away "
+            "from 'all' causes a one-time drop in certinext.domains.total, expected."
+        ),
+    )] = DomainScope.TOP,
     # Expiry check
     expiry_days: Annotated[Optional[int], typer.Option(
         "--expiry-days", metavar="DAYS",
@@ -202,6 +218,12 @@ def run(
         )
 
         domains = sess.domain.get_list()
+        scoped_domains = scope_domains(domains, domain_scope)
+        log.info(
+            "Domain scope applied",
+            scope=domain_scope.value, before=len(domains), after=len(scoped_domains),
+        )
+        domains = scoped_domains
         metrics.update(collect_domain_metrics(domains, env))
         log.info(
             "Collected domain metrics",
@@ -214,7 +236,7 @@ def run(
             refresh_failed = False
             for d in verified:
                 try:
-                    d.refresh()
+                    refresh_domain(d)
                 except (CertiNextAPIError, httpx.HTTPError) as exc:
                     # A partial refresh would undercount the expiring domains —
                     # a too-low value masks the very condition being monitored.

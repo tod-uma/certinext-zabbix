@@ -14,6 +14,7 @@ CERTINEXT_CLIENT_ID=<account number>
 CERTINEXT_CLIENT_SECRET=<client secret>
 ZABBIX_SERVER=<your zabbix server address>
 ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
+# CERTINEXT_DOMAIN_SCOPE=top   # top (default) / ns-boundary / all
 
 */15 * * * *  certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
 12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 2>>/var/log/certinext-zabbix/push.log

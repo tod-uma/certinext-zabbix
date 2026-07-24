@@ -120,6 +120,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `ZABBIX_PORT` | no | `10051` | Zabbix trapper port |
 | `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable |
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
+| `CERTINEXT_DOMAIN_SCOPE` | no | `top` | Which domains to monitor: `top`, `ns-boundary`, or `all` — see the CLI flag reference below |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
 ### CLI flag reference
@@ -127,6 +128,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | Flag | Meaning |
 |---|---|
 | `--dry-run` | Compute and print the metrics without sending anything to Zabbix. Use for validation. |
+| `--domain-scope {top,ns-boundary,all}` | Which domains to monitor — applies to all four metrics, not just expiry. `top` (default) excludes any domain with a registered ancestor in the account (no DNS lookups). `ns-boundary` does the same but re-includes a domain with its own NS records (a real DNS zone cut). `all` restores the pre-`--domain-scope` unfiltered behavior. Switching away from `all` causes a one-time drop in `certinext.domains.total` — expected, not a fault. |
 | `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call per verified domain — schedule this on a daily run, not every 15 minutes). Disabled by default. |
 | `--zabbix-server` / `--zabbix-port` / `--zabbix-host` / `--zabbix-timeout` | Override the matching environment variables above. |
 | `--sandbox` | Use the CertiNext **sandbox** API — see [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too). |
