@@ -15,8 +15,10 @@ SuccessExitStatus=130
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/tmp
+ReadWritePaths=/tmp /var/log/certinext-zabbix
 # WARNING: do NOT set PrivateTmp=yes. The single-instance lock lives in
 # /tmp and must be visible to BOTH this unit and
 # certinext-zabbix-push-expiry.service; PrivateTmp would give each unit
 # its own /tmp and defeat the lock.
+# /var/log/certinext-zabbix is only needed if CERTINEXT_ZABBIX_DEBUG_LOG
+# is set in the EnvironmentFile (see certinext-zabbix-push.env.example).

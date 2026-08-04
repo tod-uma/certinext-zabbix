@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import typer
-from certinext.cli_support import LogFormat, setup_logging
+from certinext.cli_support import LogFormat, LogMode, setup_logging
 from filelock import FileLock
 
 _TRACEBACK_HINT = "re-run with -vvv for the full traceback"
@@ -38,8 +38,28 @@ VersionOption = Annotated[bool, typer.Option(
     help="Show the installed certinext-zabbix version and exit.",
 )]
 
+# Own alias, not certinext.cli_options.DebugLogPathOption — that one bakes in
+# envvar="CERTINEXT_DEBUG_LOG" for the certinext CLI itself; this repo's own
+# env var per the observability-logging plan's per-repo path table is
+# CERTINEXT_ZABBIX_DEBUG_LOG.
+DebugLogPathOption = Annotated[Path | None, typer.Option(
+    "--debug-log-path", metavar="PATH", envvar="CERTINEXT_ZABBIX_DEBUG_LOG",
+    help=(
+        "Append a JSON-lines DEBUG-level log (with full tracebacks) to this path, "
+        "independent of --verbose (env: CERTINEXT_ZABBIX_DEBUG_LOG; default: off). "
+        "Rotation is the deployer's responsibility (e.g. logrotate). This is what "
+        "makes an unattended systemd-timer run's traceback recoverable — "
+        "log_caught_exception's paired DEBUG record is otherwise dropped below -vvv."
+    ),
+)]
 
-def configure_logging(verbose: int, log_format: LogFormat = LogFormat.LOGFMT) -> None:
+
+def configure_logging(
+    verbose: int,
+    log_format: LogFormat = LogFormat.LOGFMT,
+    log_mode: LogMode = LogMode.AUTO,
+    debug_log_path: Path | None = None,
+) -> None:
     """Configure structlog/stdlib logging with this package's run context.
 
     Delegates to :func:`certinext.cli_support.setup_logging`: correlation_id
@@ -52,10 +72,19 @@ def configure_logging(verbose: int, log_format: LogFormat = LogFormat.LOGFMT) ->
             4+=third-party DEBUG).
         log_format: Non-interactive (cron/redirected) log line format — see
             :class:`certinext.cli_support.LogFormat`. Ignored on a TTY.
+        log_mode: Whether non-interactive output drops the redundant
+            ``timestamp``/``pid`` fields — see
+            :class:`certinext.cli_support.LogMode`. Ignored on a TTY.
+        debug_log_path: When set, append a JSON-lines DEBUG-level log
+            (with full tracebacks) to this path, independent of
+            ``verbose`` — see :func:`certinext.cli_support.setup_logging`.
+            No default; unset means off.
     """
     setup_logging(
         verbose,
         log_format=log_format,
+        log_mode=log_mode,
+        debug_log_path=debug_log_path,
         extra_priority_keys=("correlation_id", "pid"),
         console_quiet_keys=("correlation_id", "pid"),
         quiet_loggers=("filelock",),

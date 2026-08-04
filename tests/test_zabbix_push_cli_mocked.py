@@ -10,12 +10,13 @@ or network are touched.
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
-from certinext.cli_support import LogFormat
+from certinext.cli_support import LogFormat, LogMode
 from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
@@ -127,7 +128,19 @@ class TestCliSupportContract:
 
     def test_verbose_count_reaches_configure_logging(self) -> None:
         _, mocks = _run(argv=["-vvv"])
-        mocks.logging.assert_called_once_with(3, LogFormat.LOGFMT)
+        mocks.logging.assert_called_once_with(3, LogFormat.LOGFMT, LogMode.AUTO, None)
+
+    def test_log_mode_and_debug_log_path_flags_reach_configure_logging(self) -> None:
+        _, mocks = _run(argv=["--log-mode", "syslog", "--debug-log-path", "/tmp/zbx-debug.log"])
+        mocks.logging.assert_called_once_with(
+            0, LogFormat.LOGFMT, LogMode.SYSLOG, Path("/tmp/zbx-debug.log"),
+        )
+
+    def test_debug_log_path_env_var_reaches_configure_logging(self) -> None:
+        _, mocks = _run(env={"CERTINEXT_ZABBIX_DEBUG_LOG": "/tmp/env-debug.log"})
+        mocks.logging.assert_called_once_with(
+            0, LogFormat.LOGFMT, LogMode.AUTO, Path("/tmp/env-debug.log"),
+        )
 
 
 class TestZabbixDestination:
