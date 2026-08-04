@@ -35,7 +35,18 @@ A task checklist for automation is at the
   aggregator (Splunk and friends auto-extract `key=value` pairs with no
   per-sourcetype configuration, unlike JSON, which only gets that treatment
   if the *entire* line is valid JSON). Pass `--log-format json` to restore
-  the old one-JSON-object-per-line format instead.
+  the old one-JSON-object-per-line format instead. Under systemd,
+  `--log-mode` (default `auto`) additionally drops the redundant
+  `timestamp`/`pid` fields, since journald already stamps both on every
+  forwarded line.
+- **Unattended-run tracebacks:** a caught exception normally logs one
+  concise line plus a DEBUG-level traceback that's dropped below `-vvv` —
+  fine interactively, but it means an unattended systemd-timer run can
+  never surface a real traceback. Set `--debug-log-path` (env
+  `CERTINEXT_ZABBIX_DEBUG_LOG`) to also append every event, including full
+  tracebacks, as JSON-lines to a file — independent of `-v`, so it's safe
+  to leave on permanently. See
+  [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run).
 - **Credentials are fail-fast:** a missing `CERTINEXT_CLIENT_ID`/
   `CERTINEXT_CLIENT_SECRET` or `--zabbix-server`/`ZABBIX_SERVER` raises an
   error and exits 1 immediately.
@@ -121,6 +132,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable |
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
 | `CERTINEXT_DOMAIN_SCOPE` | no | `top` | Which domains to monitor: `top`, `ns-boundary`, or `all` — see the CLI flag reference below |
+| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on JSON-lines DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
 ### CLI flag reference
@@ -134,6 +146,8 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `--sandbox` | Use the CertiNext **sandbox** API — see [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too). |
 | `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; logs are complete at default verbosity. |
 | `--log-format json` | Emit one JSON object per line instead of the default logfmt (`key=value`) lines. |
+| `--log-mode {auto,syslog,verbose}` | Non-interactive field verbosity: `auto` (default) drops the redundant `timestamp`/`pid` fields when systemd is detected, `syslog` always drops them, `verbose` always keeps them. |
+| `--debug-log-path PATH` | Append a JSON-lines DEBUG-level log (full tracebacks) to `PATH`, independent of `-v` — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run). |
 
 Full flag list: `/opt/certinext-zabbix/bin/certinext-zabbix-push --help`.
 
@@ -261,6 +275,28 @@ Logs land in the journal as logfmt (`key=value`) lines; every line of one run sh
 journalctl -u certinext-zabbix-push.service --since -1h
 ```
 
+### Recovering a traceback from an unattended run
+
+By default a caught exception logs one concise line (error type + message +
+a "re-run with -vvv" hint) — the full traceback is DEBUG-level and dropped
+below `-vvv`, so a systemd timer's own journal output never carries it.
+Setting `--debug-log-path` (env `CERTINEXT_ZABBIX_DEBUG_LOG`) opens a
+second, always-on log: every event, including full tracebacks, appended as
+JSON-lines to that path, independent of `-v`/`-vvv`. It's meant to be left
+on permanently in production — the concise journal line and the full
+detail in the file are two views of the same run.
+
+```bash
+# /etc/certinext-zabbix/certinext-zabbix.env
+CERTINEXT_ZABBIX_DEBUG_LOG=/var/log/certinext-zabbix/debug.log
+```
+
+Create the directory first (owned by the service user) and add it to the
+unit's `ReadWritePaths=` — already done in the example units in
+[examples/systemd/](../examples/systemd/). This repo does not rotate the
+file itself; add a `logrotate` policy for `/var/log/certinext-zabbix/` (see
+the [configuration-management checklist](#configuration-management-checklist)).
+
 ## cron alternative
 
 `/etc/cron.d` files accept environment assignments and may be root-only
@@ -372,7 +408,11 @@ parentheses):
    `/opt/certinext-zabbix/bin/certinext-zabbix-push`; re-run on version
    change).
 4. Template `/etc/certinext-zabbix/certinext-zabbix.env` (`template`,
-   `mode: "0600"`, `owner: root`); secrets from vault.
+   `mode: "0600"`, `owner: root`); secrets from vault. If
+   `CERTINEXT_ZABBIX_DEBUG_LOG` is enabled, also create
+   `/var/log/certinext-zabbix/` (`file`, `state: directory`, owned by
+   `certinextzbx`, mode `0750`) and a `logrotate` policy for it — this
+   repo does not rotate the file itself.
 5. Install the four unit files (`copy`/`template` into
    `/etc/systemd/system/`): the `certinext-zabbix-push` and
    `certinext-zabbix-push-expiry` timer/service pairs. Then

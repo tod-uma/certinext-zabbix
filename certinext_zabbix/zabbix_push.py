@@ -80,8 +80,8 @@ def scope_domains(domains: Sequence[Domain], scope: DomainScope) -> list[Domain]
     """
     if scope is DomainScope.ALL:
         return list(domains)
-    all_names = {d.name for d in domains if d.name}
-    return filter_needs_dcv(list(domains), all_names, check_ns=(scope is DomainScope.NS_BOUNDARY))
+    all_domains = list(domains)
+    return filter_needs_dcv(all_domains, all_domains, check_ns=(scope is DomainScope.NS_BOUNDARY))
 
 
 def refresh_domain(d: Domain, *, attempts: int = 3, retry_delay: float = 5.0) -> None:

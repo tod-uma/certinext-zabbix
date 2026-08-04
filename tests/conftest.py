@@ -26,3 +26,27 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ["TERMINAL_WIDTH"] = "100"
     os.environ["COLUMNS"] = "100"
     os.environ["LINES"] = "50"
+
+
+@pytest.fixture(autouse=True)
+def _clear_systemd_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear INVOCATION_ID/JOURNAL_STREAM so every test starts from a known non-systemd state.
+
+    ``certinext.cli_support.setup_logging()``'s ``LogMode.AUTO`` reads these
+    systemd-set env vars to decide whether to drop ``timestamp``/``pid``
+    from non-interactive output. GitHub Actions' ``ubuntu-latest`` runner
+    launches its own Actions Runner process as a systemd service, which
+    leaks ``INVOCATION_ID`` into every job — unlike GitLab CI's
+    Docker-executor images or local Windows dev, where it's absent. Without
+    this fixture, any test exercising non-interactive logging output
+    silently depends on which CI provider ran it (this bit ``certinext``'s
+    own test suite the same way — see its MR !106). A test that specifically
+    wants to simulate a systemd-invoked run should call
+    ``monkeypatch.setenv("INVOCATION_ID", ...)`` itself, after this fixture
+    has already cleared the ambient value.
+
+    Args:
+        monkeypatch: pytest's monkeypatch fixture.
+    """
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.delenv("JOURNAL_STREAM", raising=False)
