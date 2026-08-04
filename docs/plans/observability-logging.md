@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 depends-on: [] # certinext main library phases (1-3), already shipped/released as certinext v1.2.0a3 on PyPI
 implements-adr: []
 ---
