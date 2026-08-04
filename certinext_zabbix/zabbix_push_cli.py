@@ -300,7 +300,7 @@ def run(
         interrupted = True
     except (RuntimeError, CertiNextAPIError) as exc:
         had_errors = True
-        log.error(str(exc))
+        log_caught_exception(log, "Unexpected error", exc)
     except Exception as exc:
         # Catches anything not already handled above (e.g. domain listing
         # itself failing).
