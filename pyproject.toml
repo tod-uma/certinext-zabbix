@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "certinext>=1.2.0a4,<2",
+    "certinext>=1.2.0a5,<2",
     "dnspython",
     "filelock",
     "structlog",
