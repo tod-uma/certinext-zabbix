@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "certinext-zabbix"
-version = "0.1.0rc7"
+version = "0.1.0rc8"
 authors = [
     { name="Tod Detre", email="tod.detre@maine.edu" },
 ]
@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "certinext>=1.2.0a5,<2",
+    "certinext>=1.2.0a6,<2",
     "dnspython",
     "filelock",
     "structlog",

@@ -128,7 +128,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 |---|---|---|---|
 | `CERTINEXT_CLIENT_ID` | yes | — | CertiNext account number / OAuth2 client_id |
 | `CERTINEXT_CLIENT_SECRET` | yes | — | CertiNext OAuth2 client secret |
-| `ZABBIX_SERVER` | yes | — | Zabbix server (trapper) address. No built-in default — an unset value fails fast rather than silently targeting the wrong server. |
+| `ZABBIX_SERVER` | yes | — | Zabbix trapper address. No built-in default — an unset value fails fast rather than silently targeting the wrong server. **If the Zabbix host is monitored by a proxy, point this at the proxy, not the server** — see [Proxies and proxy groups](#proxies-and-proxy-groups). |
 | `ZABBIX_PORT` | no | `10051` | Zabbix trapper port |
 | `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable |
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
@@ -407,13 +407,61 @@ values for `certinext.domains.total[prod]` and
 A `"Zabbix rejected item values"` error means the host name, template
 link, or the `{$CERTINEXT.SENDER.ALLOWED}` macro doesn't match.
 
+## Proxies and proxy groups
+
+`ZABBIX_SERVER` must name whatever endpoint actually owns the host's trapper
+items:
+
+| Host's *Monitored by* | Point `ZABBIX_SERVER` at |
+|---|---|
+| Zabbix server | the server |
+| Proxy | **that proxy** — not the server |
+| Proxy group | the server, which redirects the sender to the assigned proxy |
+
+Sending to the server for a proxy-monitored host does not work; that is standard
+Zabbix behaviour, not a quirk of this script. `ZABBIX_HOSTNAME` is unaffected —
+it is always the host name as registered in Zabbix, wherever the data is sent.
+
+The proxy's **active/passive operating mode makes no difference here**: that
+setting governs how the proxy and server talk to each other, while a trapper
+send connects to the proxy's own listening port either way. Mode does affect how
+quickly values reach the server afterwards — an active proxy pushes on its own
+schedule, a passive one waits to be polled — which is worth accounting for when
+sizing the nodata windows below.
+
+### Redirect loops
+
+For a **proxy group**, the endpoint you connect to replies with a redirect to
+the assigned proxy's *Address for active agents*, and the sender re-sends there.
+`zabbix_utils` follows that redirect by recursing, with no hop limit and no loop
+detection — so a proxy group that hands back an address which redirects to
+itself recurses until Python's stack limit, roughly a thousand TCP connections
+in about a second.
+
+`certinext-zabbix-push` catches this and fails with `Redirect loop sending to
+<host>:<port>` rather than an unhandled `RecursionError`, and does **not** retry
+it — a retry would just replay the connection storm. If you see it:
+
+- Check each proxy in the group has a **distinct** *Address for active agents*
+  matching its own host. Two proxies sharing one address produces exactly this
+  loop, because a proxy told to forward to the assignee's address finds that
+  address is its own.
+- Confirm the assigned proxy has the host in its configuration — a proxy that
+  does not believe it owns the host will forward rather than accept.
+- As an immediate unblock, point `ZABBIX_SERVER` straight at the proxy that owns
+  the host, bypassing the redirect entirely. Note this gives up the proxy
+  group's failover.
+
+The full recursion is recoverable from the debug log — see
+[Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run).
+
 ## Network requirements
 
 | Destination | Port | Direction | Purpose |
 |---|---|---|---|
 | `us-api.certinext.io` | 443 | outbound | CertiNext API + OAuth token endpoint (proxy-able via `HTTPS_PROXY`) |
 | `sandbox-us-api.certinext.io` | 443 | outbound | Only when running with `--sandbox` |
-| Your Zabbix server | 10051 | outbound | `certinext-zabbix-push` trapper sends (same port an active-mode Zabbix agent uses) |
+| Your Zabbix server or proxy | 10051 | outbound | `certinext-zabbix-push` trapper sends (same port an active-mode Zabbix agent uses) — see [Proxies and proxy groups](#proxies-and-proxy-groups) |
 
 ## Configuration-management checklist
 
