@@ -16,7 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
-from certinext.cli_support import LogFormat, LogMode
+from certinext.cli_support import TRACEBACK_HINT, LogFormat, LogMode
 from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
@@ -27,13 +27,53 @@ from certinext_zabbix.zabbix_push_cli import app
 runner = CliRunner()
 
 _OK_RESPONSE = SimpleNamespace(processed=2, failed=0, total=2)
-_TRACEBACK_HINT = "re-run with -vvv for the full traceback"
 _DEFAULT_TEST_SERVER = "zbx.example.edu"
 
 
 def _caught_kwargs(exc: BaseException, **context: Any) -> dict[str, Any]:
-    """Build the kwargs log_caught_exception's concise line adds for *exc*."""
-    return {"error": str(exc), "error_type": type(exc).__name__, "hint": _TRACEBACK_HINT, **context}
+    """Build the kwargs log_caught_exception's concise line adds for *exc*.
+
+    Args:
+        exc: The exception the call site caught.
+        **context: Extra structured fields the call site passes through.
+
+    Returns:
+        The expected kwargs for the concise (no-traceback) line.
+    """
+    return {"error": str(exc), "error_type": type(exc).__name__, "hint": TRACEBACK_HINT, **context}
+
+
+def _assert_paired_debug_traceback(
+    mock_log: MagicMock, event: str, exc_type: type[BaseException], **context: Any
+) -> None:
+    """Assert the paired DEBUG record carries *exc_type*'s traceback.
+
+    Cannot use ``assert_any_call``: the helper passes the caught exception
+    instance as ``exc_info`` (not ``True``, which would resolve through
+    ``sys.exc_info()`` and come back empty outside an active except block), and
+    two equivalent exception instances do not compare equal.
+
+    Args:
+        mock_log: The patched logger.
+        event: The expected event name.
+        exc_type: The exception type expected in ``exc_info``.
+        **context: Extra structured fields expected on the record.
+
+    Raises:
+        AssertionError: If no matching DEBUG record carries such a traceback.
+    """
+    for call in mock_log.debug.call_args_list:
+        if call.args[:1] != (event,):
+            continue
+        passed = call.kwargs.get("exc_info")
+        if isinstance(passed, exc_type) and all(
+            call.kwargs.get(k) == v for k, v in context.items()
+        ):
+            return
+    raise AssertionError(
+        f"no debug({event!r}, exc_info=<{exc_type.__name__}>, {context}) in "
+        f"{mock_log.debug.call_args_list}"
+    )
 
 
 def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
@@ -239,11 +279,19 @@ class TestRunOutcomes:
         mock_push.assert_not_called()
         assert result.output.strip() == ""
 
-    def test_unclassified_failure_logs_concisely_not_a_traceback(self) -> None:
-        """Nothing this script doesn't already have a named branch for —
-        e.g. domain listing raising something outside RuntimeError/
-        CertiNextAPIError — should still fall through to one clean line,
-        never log.exception's full traceback."""
+    def test_unclassified_failure_attaches_a_truncated_traceback(self) -> None:
+        """Nothing this script has a named branch for — e.g. domain listing
+        raising something outside RuntimeError/CertiNextAPIError — falls
+        through to the outermost handler, which *does* attach a traceback.
+
+        This inverts what the test previously pinned. Before certinext ADR
+        0014, every caught exception logged concisely with a re-run hint,
+        because the per-domain loop could otherwise dump one stack per domain.
+        The outermost handler fires at most once per run, so it is exempt:
+        attaching the stack there is what gets an unattended failure
+        diagnosable from the journal alone, now that ADR 0012 made the debug
+        sidecar host-local. ``log.exception`` is still never used.
+        """
         mock_sess = MagicMock()
         mock_sess.domain.get_list.side_effect = ValueError("unparseable response")
         with patch("certinext_zabbix.zabbix_push_cli.resolve_connection",
@@ -255,9 +303,19 @@ class TestRunOutcomes:
              patch("certinext_zabbix.zabbix_push_cli.log") as mock_log:
             result = runner.invoke(app, [], env={"ZABBIX_SERVER": _DEFAULT_TEST_SERVER})
         assert result.exit_code == 1
-        exc = ValueError("unparseable response")
-        mock_log.error.assert_any_call("Unexpected error", **_caught_kwargs(exc))
-        mock_log.debug.assert_any_call("Unexpected error", exc_info=True)
+
+        error_calls = [c for c in mock_log.error.call_args_list if c.args[:1] == ("Unexpected error",)]
+        assert error_calls, mock_log.error.call_args_list
+        kwargs = error_calls[0].kwargs
+        assert kwargs["error"] == "unparseable response"
+        assert kwargs["error_type"] == "ValueError"
+        # The stack is on the visible line, and the re-run hint is gone with it:
+        # "re-run with -vvv" is not the next step when the stack is right there.
+        assert "Traceback (most recent call last):" in kwargs["exception"]
+        assert "ValueError: unparseable response" in kwargs["exception"]
+        assert "hint" not in kwargs
+
+        _assert_paired_debug_traceback(mock_log, "Unexpected error", ValueError)
         mock_log.exception.assert_not_called()
 
 
@@ -301,8 +359,8 @@ class TestExpiryPath:
         mocks.log.warning.assert_any_call(
             "Failed to refresh domain", **_caught_kwargs(exc, domain="timeout.edu"),
         )
-        mocks.log.debug.assert_any_call(
-            "Failed to refresh domain", exc_info=True, domain="timeout.edu",
+        _assert_paired_debug_traceback(
+            mocks.log, "Failed to refresh domain", httpx.ReadTimeout, domain="timeout.edu",
         )
         mocks.log.exception.assert_not_called()
 
@@ -319,8 +377,9 @@ class TestExpiryPath:
             "Failed to refresh domain — unexpected error",
             **_caught_kwargs(exc, domain="weird.edu"),
         )
-        mocks.log.debug.assert_any_call(
-            "Failed to refresh domain — unexpected error", exc_info=True, domain="weird.edu",
+        _assert_paired_debug_traceback(
+            mocks.log, "Failed to refresh domain — unexpected error", RuntimeError,
+            domain="weird.edu",
         )
         mocks.log.exception.assert_not_called()
 
@@ -349,8 +408,8 @@ class TestZabbixUnreachable:
         mock_log.error.assert_any_call(
             event, **_caught_kwargs(exc, server=_DEFAULT_TEST_SERVER, port=10051),
         )
-        mock_log.debug.assert_any_call(
-            event, exc_info=True, server=_DEFAULT_TEST_SERVER, port=10051,
+        _assert_paired_debug_traceback(
+            mock_log, event, ProcessingError, server=_DEFAULT_TEST_SERVER, port=10051,
         )
         mock_log.exception.assert_not_called()
 

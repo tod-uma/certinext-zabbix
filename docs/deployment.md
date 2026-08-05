@@ -39,13 +39,14 @@ A task checklist for automation is at the
   `--log-mode` (default `auto`) additionally drops the redundant
   `timestamp`/`pid` fields, since journald already stamps both on every
   forwarded line.
-- **Unattended-run tracebacks:** a caught exception normally logs one
-  concise line plus a DEBUG-level traceback that's dropped below `-vvv` —
-  fine interactively, but it means an unattended systemd-timer run can
-  never surface a real traceback. Set `--debug-log-path` (env
-  `CERTINEXT_ZABBIX_DEBUG_LOG`) to also append every event, including full
-  tracebacks, as JSON-lines to a file — independent of `-v`, so it's safe
-  to leave on permanently. See
+- **Unattended-run tracebacks:** a run that fails outright logs a truncated
+  traceback on its own journal line, so the usual "what blew up?" question is
+  answerable from the journal alone. Per-domain failures stay concise — one
+  bad run would otherwise dump a stack per domain. For the full untruncated
+  stack, and for everything that happened *before* the failure, set
+  `--debug-log-path` (env `CERTINEXT_ZABBIX_DEBUG_LOG`) to append every event
+  to a host-local file, independent of `-v`, so it's safe to leave on
+  permanently. See
   [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run).
 - **Credentials are fail-fast:** a missing `CERTINEXT_CLIENT_ID`/
   `CERTINEXT_CLIENT_SECRET` or `--zabbix-server`/`ZABBIX_SERVER` raises an
@@ -132,7 +133,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable |
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
 | `CERTINEXT_DOMAIN_SCOPE` | no | `top` | Which domains to monitor: `top`, `ns-boundary`, or `all` — see the CLI flag reference below |
-| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on JSON-lines DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
+| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
 ### CLI flag reference
@@ -147,7 +148,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; logs are complete at default verbosity. |
 | `--log-format json` | Emit one JSON object per line instead of the default logfmt (`key=value`) lines. |
 | `--log-mode {auto,syslog,verbose}` | Non-interactive field verbosity: `auto` (default) drops the redundant `timestamp`/`pid` fields when systemd is detected, `syslog` always drops them, `verbose` always keeps them. |
-| `--debug-log-path PATH` | Append a JSON-lines DEBUG-level log (full tracebacks) to `PATH`, independent of `-v` — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run). |
+| `--debug-log-path PATH` | Append a human-readable DEBUG-level log (full tracebacks) to `PATH`, independent of `-v` — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run). |
 
 Full flag list: `/opt/certinext-zabbix/bin/certinext-zabbix-push --help`.
 
@@ -277,14 +278,33 @@ journalctl -u certinext-zabbix-push.service --since -1h
 
 ### Recovering a traceback from an unattended run
 
-By default a caught exception logs one concise line (error type + message +
-a "re-run with -vvv" hint) — the full traceback is DEBUG-level and dropped
-below `-vvv`, so a systemd timer's own journal output never carries it.
-Setting `--debug-log-path` (env `CERTINEXT_ZABBIX_DEBUG_LOG`) opens a
-second, always-on log: every event, including full tracebacks, appended as
-JSON-lines to that path, independent of `-v`/`-vvv`. It's meant to be left
-on permanently in production — the concise journal line and the full
-detail in the file are two views of the same run.
+Two places carry a traceback, and they answer different questions.
+
+**The journal** carries one when the *whole run* fails — the outermost
+handler attaches the stack to its `level=error` line as a quoted
+`exception="Traceback...\n..."` field, truncated to the innermost frames and
+escaped onto a single line so journald and rsyslog can't split it into
+fragments. Because the line is logfmt, `exception` is an extracted field in
+Splunk with no per-sourcetype configuration, joinable to the rest of the run
+on `correlation_id`. Per-domain failures deliberately do **not** carry one:
+they log concisely with a "re-run with -vvv" hint, because a systemic failure
+would otherwise emit one stack per domain.
+
+**The debug-log file** carries the full untruncated stack, plus every DEBUG
+event leading up to the failure — often more diagnostic than the traceback
+itself. Setting `--debug-log-path` (env `CERTINEXT_ZABBIX_DEBUG_LOG`) opens
+it, independent of `-v`/`-vvv`, in the same human-readable format you get on
+a terminal. It is **host-local by design** and deliberately not ingested into
+Splunk, so reading it means SSH-ing to the host:
+
+```bash
+grep -A30 'level=error' /var/log/certinext-zabbix/debug.log
+```
+
+Two consequences of that being host-local: log rotation is the only thing
+bounding how far back you can look, so size the retention window against how
+long a broken timer might go unnoticed; and the file is lost if the host is
+rebuilt.
 
 ```bash
 # /etc/certinext-zabbix/certinext-zabbix.env
