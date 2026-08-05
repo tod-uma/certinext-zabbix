@@ -10,13 +10,21 @@ import sys
 import tempfile
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated
 
 import typer
-from certinext.cli_support import LogFormat, LogMode, setup_logging
+from certinext.cli_support import (
+    LogFormat,
+    LogMode,
+    setup_logging,
+)
+from certinext.cli_support import (
+    # Re-exported: this module is the entry point's single source of CLI glue,
+    # and the helper lived here as a private copy until certinext ADR 0013
+    # promoted it into the library. Importers keep working unchanged.
+    log_caught_exception as log_caught_exception,
+)
 from filelock import FileLock
-
-_TRACEBACK_HINT = "re-run with -vvv for the full traceback"
 
 
 def _version_callback(show_version: bool) -> None:
@@ -110,41 +118,6 @@ def run_lock(name: str) -> FileLock:
         A zero-timeout :class:`filelock.FileLock`, not yet acquired.
     """
     return FileLock(str(Path(tempfile.gettempdir()) / f"{name}.lock"), timeout=0)
-
-
-def log_caught_exception(
-    log: Any,
-    event: str,
-    exc: BaseException,
-    *,
-    level: Literal["warning", "error"] = "error",
-    **context: Any,
-) -> None:
-    """Log a caught exception as one concise, syslog-safe line.
-
-    Cron-fed logs must never carry a raw traceback — one bad run can dump
-    one per domain/attempt, turning a syslog alert into a multi-KB stack
-    dump. This emits *event* at *level* with the exception's type and
-    message plus a hint to re-run at higher verbosity, then pairs it with a
-    DEBUG-level record carrying the real traceback. Below ``-vvv``,
-    structlog's filtering bound logger drops that debug call before it does
-    any work, so the traceback never reaches a normal (INFO-level) run —
-    interactively adding ``-vvv`` is what actually surfaces it.
-
-    Args:
-        log: The bound structlog logger to emit through.
-        event: The log event name/message (used for both records).
-        exc: The caught exception.
-        level: Log level for the concise line — ``"warning"`` for an
-            expected, lower-severity failure mode, ``"error"`` (default)
-            otherwise.
-        **context: Extra structured fields (e.g. ``domain=...``) attached to
-            both the concise line and the paired debug traceback.
-    """
-    getattr(log, level)(
-        event, error=str(exc), error_type=type(exc).__name__, hint=_TRACEBACK_HINT, **context,
-    )
-    log.debug(event, exc_info=True, **context)
 
 
 def _sigterm_handler(_signum: int, _frame: object) -> None:
