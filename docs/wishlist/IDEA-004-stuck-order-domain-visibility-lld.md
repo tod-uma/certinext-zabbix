@@ -2,21 +2,23 @@
 
 - **Status:** Proposed
 - **Created:** 2026-08-07
-- **Updated:** 2026-08-07
+- **Updated:** 2026-08-08
 
 ## Context
 
-The order-health metrics added alongside `certinext.orders.pending` and
-`certinext.orders.failed_recent` only report **counts** — e.g. "3 orders
-pending." `OrderRecord.common_name` (the order's primary domain) is already
-present on every fetched record (`fetch_orders_by_status()` in
+The order-health metrics (`certinext.orders.unissued`,
+`certinext.orders.undownloaded`, `certinext.orders.failed_recent`) only
+report **counts** — e.g. "3 orders awaiting issuance."
+`OrderRecord.common_name` (the order's primary domain) is already present
+on every fetched record (`fetch_orders()` / `bucket_orders()` in
 `certinext_zabbix/zabbix_push.py`), but isn't surfaced anywhere: an admin
-seeing the pending-count alert fire still has to log into the CertiNext
-portal to find out *which* domain's order is stuck.
+seeing one of those alerts fire still has to log into the CertiNext portal
+to find out *which* domain's order is stuck.
 
 ## The idea
 
-Use Zabbix Low-Level Discovery (LLD) to turn each pending/failed order's
+Use Zabbix Low-Level Discovery (LLD) to turn each unissued/undownloaded/
+failed order's
 `common_name` into its own discovered item, instead of (or alongside) the
 aggregate counts. A discovery rule would push one JSON entry per stuck order
 (keyed on domain/order number), and an item prototype would turn that into a
@@ -36,8 +38,8 @@ template-authoring cost. Worth doing once the count-based alerts have proven
 themselves useful in practice and someone's actually had to go log into the
 portal to find the stuck domain more than once.
 
-**What would change this:** the count-based order-health metrics (pending,
-failed-recent) are live and have fired at least once in practice, and the
+**What would change this:** the count-based order-health metrics
+(unissued, undownloaded, failed-recent) are live and have fired at least once in practice, and the
 "which domain" lookup step is enough friction that automating it is clearly
 worth the added template complexity.
 
@@ -68,11 +70,11 @@ protocol, per the
 an item prototype per discovered `{#DOMAIN}` (or `{#ORDER}`), and a
 decision on prototype triggers vs. relying on the existing aggregate
 triggers. No new CertiNext API calls — same data already fetched by
-`fetch_orders_by_status()`.
+`fetch_orders()`.
 
 ## Open questions & caveats
 
-- One discovery rule per bucket (pending, failed) or a single rule with a
+- One discovery rule per bucket (unissued, undownloaded, failed) or a single rule with a
   status field per entry? A single rule is less template surface but makes
   per-bucket trigger severity harder to express.
 - Key discovery entries on `common_name` or `order_number`? `order_number`

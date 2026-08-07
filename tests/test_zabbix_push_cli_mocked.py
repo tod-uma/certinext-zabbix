@@ -99,12 +99,19 @@ def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
     return domain
 
 
-def _order(order_status: str = "Order Accepted", order_date: str | None = None) -> OrderRecord:
+def _order(
+    order_status: str = "Order Accepted",
+    order_date: str | None = None,
+    certificate_expiry_date: str | None = None,
+) -> OrderRecord:
     """Build an OrderRecord from wire-format fields for order-health tests.
 
     Args:
         order_status: Value for the ``orderStatus`` wire field.
         order_date: ISO timestamp for ``orderDate``, or None to omit it.
+        certificate_expiry_date: ISO timestamp for ``certificateExpiryDate``,
+            or None to omit it. Its presence is what splits an accepted
+            order into the undownloaded bucket rather than unissued.
 
     Returns:
         A validated OrderRecord (no API client attached — field access only).
@@ -112,6 +119,8 @@ def _order(order_status: str = "Order Accepted", order_date: str | None = None) 
     payload: dict[str, Any] = {"orderStatus": order_status}
     if order_date is not None:
         payload["orderDate"] = order_date
+    if certificate_expiry_date is not None:
+        payload["certificateExpiryDate"] = certificate_expiry_date
     return OrderRecord.model_validate(payload)
 
 
@@ -119,7 +128,7 @@ def _run(
     argv: list[str] | None = None,
     env: dict[str, str] | None = None,
     domains: list[Any] | None = None,
-    orders_by_status: dict[str, list[Any]] | None = None,
+    orders: list[Any] | None = None,
     response: Any = _OK_RESPONSE,
     sandbox: bool = False,
 ) -> tuple[Any, SimpleNamespace]:
@@ -127,9 +136,10 @@ def _run(
 
     resolve_connection / build_session / push_metrics / configure_logging are
     patched in the CLI module's namespace. The mocked session returns
-    *domains* (default empty) and, for the orders accessor, looks up each
-    status query in *orders_by_status* (default: every status returns an
-    empty list). push_metrics returns *response*, and the resolved
+    *domains* (default empty) and, for the orders accessor, *orders*
+    (default empty) from its single unfiltered
+    :meth:`OrderAccessor.get_list` call. push_metrics returns *response*,
+    and the resolved
     connection reports *sandbox* (drives the [env] key parameter).
     ``ZABBIX_SERVER`` defaults to a test value since the CLI now requires it
     with no built-in default — pass ``env={"ZABBIX_SERVER": ...}`` to
@@ -140,8 +150,7 @@ def _run(
     """
     mock_sess = MagicMock()
     mock_sess.domain.get_list.return_value = domains if domains is not None else []
-    by_status = orders_by_status or {}
-    mock_sess.orders.get_list.side_effect = lambda status, since=None: by_status.get(status, [])
+    mock_sess.orders.get_list.return_value = orders if orders is not None else []
     mock_conn = MagicMock(sandbox=sandbox)
     full_env = {"ZABBIX_SERVER": _DEFAULT_TEST_SERVER, **(env or {})}
 
@@ -410,15 +419,17 @@ class TestOrderHealthPath:
     """--order-health fetches the orders report and honors the skip policy."""
 
     def test_order_health_metrics_included(self) -> None:
-        orders_by_status = {
-            "pending-dcv": [_order("Order Accepted")],
-            "rejected": [_order(order_date="2026-01-01T00:00:00")],
-            "issued": [_order(order_date="2026-01-01T00:00:00")],
-        }
-        result, mocks = _run(argv=["--order-health"], orders_by_status=orders_by_status)
+        orders = [
+            _order("Order Accepted"),
+            _order("Order Accepted", certificate_expiry_date="2027-01-01T00:00:00"),
+            _order("Order Cancelled", order_date="2026-01-01T00:00:00"),
+            _order("Order Fulfilled", order_date="2026-01-01T00:00:00"),
+        ]
+        result, mocks = _run(argv=["--order-health"], orders=orders)
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
-        assert metrics["certinext.orders.pending[prod]"] == 1
+        assert metrics["certinext.orders.unissued[prod]"] == 1
+        assert metrics["certinext.orders.undownloaded[prod]"] == 1
         assert "certinext.orders.failed_recent[prod]" in metrics
         assert "certinext.orders.expiring[prod]" in metrics
         assert "certinext.orders.days_since_issued[prod]" in metrics
@@ -427,15 +438,17 @@ class TestOrderHealthPath:
         _, mocks = _run()
         mocks.sess.orders.get_list.assert_not_called()
 
-    def test_fetches_all_documented_status_filters(self) -> None:
+    def test_fetches_once_with_no_status_filter(self) -> None:
+        """One unfiltered call, not a per-status fan-out.
+
+        Regression guard for sysadmin/certinext-zabbix#3: the previous
+        design queried all 6 documented ``pending-*`` values, 5 of which
+        return HTTP 422 — which failed the whole fetch and silently dropped
+        every order metric on every run.
+        """
         _, mocks = _run(argv=["--order-health"])
-        queried = {call.kwargs["status"] for call in mocks.sess.orders.get_list.call_args_list}
-        assert queried == {
-            "pending-dcv", "pending-organization-verification", "pending-csr",
-            "pending-documents", "pending-agreement", "pending-approval",
-            "rejected", "cancelled", "expired", "revoked",
-            "issued",
-        }
+        assert mocks.sess.orders.get_list.call_count == 1
+        assert "status" not in mocks.sess.orders.get_list.call_args.kwargs
 
     def test_lookback_flag_reaches_collect_order_metrics(self) -> None:
         with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
@@ -443,24 +456,15 @@ class TestOrderHealthPath:
             _run(argv=["--order-health", "--order-failing-lookback-days", "10"])
         assert mock_collect.call_args.kwargs["failing_lookback_days"] == 10
 
-    def test_lookback_bounds_only_the_failed_status_fetch(self) -> None:
-        """Only the failed-recent statuses (rejected/cancelled/expired/
-        revoked) get a since= cutoff derived from the lookback flag —
-        pending and issued must stay unbounded (see fetch_orders_by_status's
-        docstring for why bounding those would silently undercount)."""
-        _, mocks = _run(argv=["--order-health", "--order-failing-lookback-days", "10"])
-        since_by_status = {
-            call.kwargs["status"]: call.kwargs["since"]
-            for call in mocks.sess.orders.get_list.call_args_list
-        }
+    def test_history_flag_bounds_the_fetch(self) -> None:
+        _, mocks = _run(argv=["--order-health", "--order-history-days", "10"])
         expected_since = (datetime.now(timezone.utc) - timedelta(days=10)).date()
-        for status in ("rejected", "cancelled", "expired", "revoked"):
-            assert since_by_status[status] == expected_since
-        for status in (
-            "pending-dcv", "pending-organization-verification", "pending-csr",
-            "pending-documents", "pending-agreement", "pending-approval", "issued",
-        ):
-            assert since_by_status[status] is None
+        assert mocks.sess.orders.get_list.call_args.kwargs["since"] == expected_since
+
+    def test_history_default_bounds_the_fetch_at_three_years(self) -> None:
+        _, mocks = _run(argv=["--order-health"])
+        expected_since = (datetime.now(timezone.utc) - timedelta(days=1095)).date()
+        assert mocks.sess.orders.get_list.call_args.kwargs["since"] == expected_since
 
     def test_lookback_default_reaches_collect_order_metrics(self) -> None:
         with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",

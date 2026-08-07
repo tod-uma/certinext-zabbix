@@ -17,20 +17,22 @@ Three metric families, matching the three designed checks:
 - **Expiry metrics** (one API detail call per verified domain): how many
   verified domains' DCV expires within the renewal lead time, and the
   minimum days left. Pushed only when the caller opts in (daily run).
-- **Order-health metrics** (several Orders Report list calls): orders stuck
-  in a pending certificate status, orders that recently failed (rejected/
-  cancelled/expired/revoked), days since the last certificate was issued,
-  and issued certificates expiring within a lead time (from the same
-  ``issued`` list already fetched for the days-since-issued metric — no
-  extra API calls). Pushed only when the caller opts in (daily run) — see
-  :func:`collect_order_metrics` for why the thresholds are deliberately
-  conservative given the vendor's free-text status fields.
+- **Order-health metrics** (one unfiltered Orders Report list call, split
+  client-side by :func:`bucket_orders`): orders the CA never issued a
+  certificate for, orders whose certificate was generated but never
+  downloaded, orders that recently failed, days since the last certificate
+  was issued, and certificates expiring within a lead time. Pushed only
+  when the caller opts in (daily run) — see :func:`collect_order_metrics`
+  for why the thresholds are deliberately conservative given the vendor's
+  free-text status fields, and :func:`fetch_orders` for why the vendor's
+  server-side ``status`` filter is unusable here.
 """
 
 import time
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
+from typing import NamedTuple
 
 import httpx
 import structlog
@@ -48,7 +50,8 @@ KEY_TOTAL = "certinext.domains.total"
 KEY_UNVERIFIED = "certinext.domains.unverified"
 KEY_EXPIRING = "certinext.dcv.expiring"
 KEY_MIN_DAYS_LEFT = "certinext.dcv.min_days_left"
-KEY_ORDERS_PENDING = "certinext.orders.pending"
+KEY_ORDERS_UNISSUED = "certinext.orders.unissued"
+KEY_ORDERS_UNDOWNLOADED = "certinext.orders.undownloaded"
 KEY_ORDERS_FAILED_RECENT = "certinext.orders.failed_recent"
 KEY_ORDERS_DAYS_SINCE_ISSUED = "certinext.orders.days_since_issued"
 KEY_ORDERS_EXPIRING = "certinext.orders.expiring"
@@ -58,21 +61,20 @@ ENV_SANDBOX = "sandbox"
 
 _SECONDS_PER_DAY = 86400
 
-# certinext.models.orders.CertificateStatus values that mean "not yet
-# resolved" vs. "resolved unsuccessfully" — see that Literal's docstring for
-# why these are the vendor's documented filter values, not the free-text
-# certificate_status strings the API actually returns (ADR: comparing the
-# free text against this enum verbatim was the pre-1.1.0 certinext bug this
-# design avoids repeating).
-PENDING_CERTIFICATE_STATUSES = (
-    "pending-dcv",
-    "pending-organization-verification",
-    "pending-csr",
-    "pending-documents",
-    "pending-agreement",
-    "pending-approval",
-)
-FAILED_CERTIFICATE_STATUSES = ("rejected", "cancelled", "expired", "revoked")
+# OrderRecord.order_status values used to bucket the orders report.
+#
+# These are the only two values we classify positively; everything else is
+# treated as a failure (see :func:`bucket_orders`). We deliberately do NOT
+# filter server-side on the vendor's ``status`` param: 5 of its 6 documented
+# ``pending-*`` values return HTTP 422 (sysadmin/certinext-zabbix#3, proven
+# in certinext's test_probe_r16_pending_substatus_rejected against both
+# sandbox and prod), so a status-filtered pending fetch cannot work at all.
+# ``order_status`` is the field certinext's own docs designate as the
+# reliable programmatic check — unlike the free-text ``certificate_status``
+# display strings, which comparing against an enum verbatim was the
+# pre-1.1.0 certinext bug this design avoids repeating.
+ORDER_STATUS_FULFILLED = "Order Fulfilled"
+ORDER_STATUS_ACCEPTED = "Order Accepted"
 
 
 class DomainScope(str, Enum):
@@ -253,107 +255,189 @@ def collect_expiry_metrics(
     return metrics
 
 
-def fetch_orders_by_status(
+class OrderBuckets(NamedTuple):
+    """The orders report split into the four buckets the metrics need.
+
+    Produced by :func:`bucket_orders` and consumed by
+    :func:`collect_order_metrics`. The names deliberately avoid the word
+    "pending": the vendor's ``status`` param uses ``pending-*`` for the
+    whole pre-fulfillment space, which spans both :attr:`unissued` and
+    :attr:`undownloaded`, so reusing it for either half alone would
+    mislead anyone cross-referencing the API docs.
+    """
+
+    unissued: list[OrderRecord]
+    undownloaded: list[OrderRecord]
+    failed: list[OrderRecord]
+    issued: list[OrderRecord]
+
+
+def fetch_orders(
     orders: OrderAccessor,
-    statuses: Sequence[str],
     *,
     since: date | None = None,
     attempts: int = 3,
     retry_delay: float = 5.0,
 ) -> list[OrderRecord]:
-    """Fetch and concatenate orders across several status filters.
+    """Fetch the orders report unfiltered, with retries.
 
-    One status filter's records are paginated internally by
-    :meth:`OrderAccessor.get_list`; this only adds the outer loop across
-    *statuses* plus the same retry idiom as :func:`refresh_domain` — a
-    single flaky status query shouldn't abort the whole order-health check.
+    Deliberately passes no ``status`` filter. The vendor's ``status`` param
+    rejects 5 of its 6 documented ``pending-*`` values with HTTP 422
+    (sysadmin/certinext-zabbix#3), so any status-filtered pending query
+    fails outright; and ``pending-approval`` alone catches only a fraction
+    of genuinely-pending orders (5 of 17 in a 100-row prod sample). One
+    unfiltered pass plus :func:`bucket_orders` is both correct and cheaper
+    — it replaces what were three separate status-filtered fetches.
+
+    Pages are handled internally by :meth:`OrderAccessor.get_list`; this
+    only adds the same retry idiom as :func:`refresh_domain`.
 
     Args:
         orders: The session's order accessor (``sess.orders``).
-        statuses: Vendor status-filter values to query, e.g.
-            :data:`PENDING_CERTIFICATE_STATUSES`.
-        since: Optional start date (inclusive), passed through to
-            :meth:`OrderAccessor.get_list` as its ``since`` param on every
-            status. Only pass this for a bucket whose caller already
-            discards anything older client-side (e.g. the failed-recent
-            lookback) — bounding a bucket the caller needs full history
-            for (pending, issued) would silently undercount.
-        attempts: Total tries per status (>= 1) before re-raising.
+        since: Optional start date (inclusive) bounding the report, passed
+            through to :meth:`OrderAccessor.get_list`. Bounds unbounded
+            growth of the fetch as order history accumulates; see the
+            ``--order-history-days`` CLI flag for why a multi-year horizon
+            is safe for every metric derived from these records.
+        attempts: Total tries (>= 1) before re-raising.
         retry_delay: Seconds to wait between tries.
 
     Returns:
-        Combined records across every status in *statuses*.
+        Every order record in the (optionally date-bounded) report.
 
     Raises:
-        CertiNextAPIError: On the final attempt for any status filter.
+        CertiNextAPIError: On the final attempt.
         httpx.HTTPError: Same, for a transport-level failure.
     """
-    records: list[OrderRecord] = []
-    for status in statuses:
-        for attempt in range(1, attempts + 1):
-            try:
-                records.extend(orders.get_list(status=status, since=since))
-                break
-            except (CertiNextAPIError, httpx.HTTPError):
-                if attempt >= attempts:
-                    raise
-                log.warning(
-                    "Order fetch failed — retrying",
-                    status=status, attempt=attempt, attempts=attempts, retry_delay=retry_delay,
-                )
-                time.sleep(retry_delay)
-    return records
+    for attempt in range(1, attempts + 1):
+        try:
+            return orders.get_list(since=since)
+        except (CertiNextAPIError, httpx.HTTPError):
+            if attempt >= attempts:
+                raise
+            log.warning(
+                "Order fetch failed — retrying",
+                attempt=attempt, attempts=attempts, retry_delay=retry_delay,
+            )
+            time.sleep(retry_delay)
+    # Unreachable: the loop either returns or re-raises on the final attempt.
+    raise AssertionError("fetch_orders exhausted its retry loop without returning")
+
+
+def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
+    """Split *records* four ways on ``order_status`` and cert presence.
+
+    Only :data:`ORDER_STATUS_FULFILLED` and :data:`ORDER_STATUS_ACCEPTED`
+    are classified positively; every other non-empty ``order_status`` falls
+    into :attr:`~OrderBuckets.failed`. That catch-all is deliberate — a
+    live 100-row prod sample carried only ``"Order Cancelled"`` as a third
+    value, but the vendor's rejected/expired/revoked orders have never been
+    observed and their ``order_status`` strings are undocumented. Treating
+    an unknown terminal status as a failure surfaces it on the
+    failed-recent metric rather than silently dropping it from every
+    bucket. Unrecognized values are logged once per run so drift is visible.
+
+    An accepted order is split again on whether a certificate exists for
+    it, because the two halves need different remediation: an order the CA
+    never issued is chased through the issuance workflow (approval, DCV,
+    CSR), whereas an issued-but-unfetched certificate is a delivery/
+    automation failure — someone has a cert they paid for and never
+    deployed.
+
+    That split keys on ``certificate_expiry_date`` being populated, *not*
+    on the ``certificate_status`` display string. The date is a typed field
+    that only exists once the CA has generated a certificate; the display
+    string is vendor free text, and comparing it against an enum verbatim
+    was the pre-1.1.0 certinext bug this design avoids repeating. The two
+    agree perfectly across the full 158-row prod+sandbox corpus: every
+    ``"Certificate Generated"`` / ``"Certificate Downloaded"`` row has the
+    date set, and every other row has it null.
+
+    Records with no ``order_status`` at all are counted nowhere (they carry
+    no signal either way) and logged.
+
+    Args:
+        records: Order records as returned by :func:`fetch_orders`.
+
+    Returns:
+        An :class:`OrderBuckets` quadruple. Order within each bucket
+        follows *records*.
+    """
+    buckets = OrderBuckets(unissued=[], undownloaded=[], failed=[], issued=[])
+    unrecognized: set[str] = set()
+    missing_status = 0
+    for record in records:
+        status = record.order_status
+        if status == ORDER_STATUS_FULFILLED:
+            buckets.issued.append(record)
+        elif status == ORDER_STATUS_ACCEPTED:
+            if record.certificate_expiry_date is not None:
+                buckets.undownloaded.append(record)
+            else:
+                buckets.unissued.append(record)
+        elif status:
+            unrecognized.add(status)
+            buckets.failed.append(record)
+        else:
+            missing_status += 1
+    if unrecognized:
+        log.info(
+            "Bucketed orders with unrecognized order_status as failed",
+            statuses=sorted(unrecognized),
+        )
+    if missing_status:
+        log.warning(
+            "Skipped orders with no order_status — counted in no bucket",
+            count=missing_status,
+        )
+    return buckets
 
 
 def collect_order_metrics(
-    pending: Sequence[OrderRecord],
-    failed: Sequence[OrderRecord],
-    issued: Sequence[OrderRecord],
+    buckets: OrderBuckets,
     env: str,
     *,
     failing_lookback_days: int,
     cert_expiry_days: int,
     now: datetime | None = None,
 ) -> dict[str, int | float]:
-    """Compute the order-health metrics from pre-fetched order buckets.
+    """Compute the order-health metrics from pre-bucketed orders.
 
-    Deliberately avoids ``OrderRecord.certificate_status`` (a vendor
-    free-text display string — see :data:`PENDING_CERTIFICATE_STATUSES`)
-    for anything beyond the server-side status filter already applied by
-    the caller. ``order_status`` is the only field confirmed reliable
-    against live data, and only for two values (``"Order Fulfilled"`` /
-    anything else) — see :class:`~certinext.models.orders.OrderRecord`.
+    Deliberately avoids ``OrderRecord.certificate_status`` — a vendor
+    free-text display string. :func:`bucket_orders` has already classified
+    on ``order_status`` and ``certificate_expiry_date``, both typed and
+    confirmed reliable against live data (see
+    :class:`~certinext.models.orders.OrderRecord`); nothing here
+    re-inspects either status field.
 
-    The pending count is pushed raw, current-state, with no age filtering
-    here: the Zabbix side applies the age threshold via a ``min()`` window
-    trigger (``{$CERTINEXT.ORDER.STUCK_AGE}``), the same pattern already
-    used for ``certinext.domains.unverified``. The failed-recent count
-    *is* date-filtered here, because it has no equivalent Zabbix-side
-    history to filter on — a rejected/cancelled/expired/revoked order is a
-    terminal vendor-side event timestamped by ``order_date``, not something
-    that stays continuously true in Zabbix's own item history.
+    The unissued and undownloaded counts are pushed raw, current-state,
+    with no age filtering here: the Zabbix side applies the age threshold
+    via ``min()`` window triggers, the same pattern already used for
+    ``certinext.domains.unverified``. The failed-recent count *is*
+    date-filtered here, because it has no equivalent Zabbix-side history to
+    filter on — a rejected/cancelled/expired/revoked order is a terminal
+    vendor-side event timestamped by ``order_date``, not something that
+    stays continuously true in Zabbix's own item history.
 
-    The expiring-soon count reuses *issued* (already fetched for
-    :data:`KEY_ORDERS_DAYS_SINCE_ISSUED`) and its
-    ``certificate_expiry_date`` field — a distinct signal from
-    ``certinext.dcv.expiring`` (:func:`collect_expiry_metrics`): that metric
-    tracks DCV *verification* expiry, this tracks the issued *certificate's*
-    expiry per the CA's own order record, independent of DCV state.
+    The expiring-soon count spans both cert-bearing buckets (*issued* and
+    *undownloaded*) — a generated certificate expires on the CA's schedule
+    whether or not anyone ever fetched it. It is a distinct signal from
+    ``certinext.dcv.expiring`` (:func:`collect_expiry_metrics`): that
+    metric tracks DCV *verification* expiry, this tracks the certificate's
+    own expiry per the order record, independent of DCV state.
+    Days-since-issued likewise spans both, since it measures whether the CA
+    is still issuing at all, not whether we collected the result.
 
     Args:
-        pending: Orders returned by querying each of
-            :data:`PENDING_CERTIFICATE_STATUSES`.
-        failed: Orders returned by querying each of
-            :data:`FAILED_CERTIFICATE_STATUSES`.
-        issued: Orders returned by querying ``status="issued"``.
+        buckets: The report split by :func:`bucket_orders`.
         env: Environment key parameter (:data:`ENV_PROD` /
             :data:`ENV_SANDBOX`) — see :func:`item_key`.
-        failing_lookback_days: Only *failed* orders whose ``order_date``
+        failing_lookback_days: Only failed orders whose ``order_date``
             falls within this many days of *now* count toward
             :data:`KEY_ORDERS_FAILED_RECENT` — older rejections/
             cancellations are normal history, not something to alert on
             forever.
-        cert_expiry_days: An *issued* order counts toward
+        cert_expiry_days: A cert-bearing order counts toward
             :data:`KEY_ORDERS_EXPIRING` when its ``certificate_expiry_date``
             falls within this many days of *now* (already-expired
             included) — the same lead-time semantics as
@@ -362,32 +446,34 @@ def collect_order_metrics(
             the current UTC time; injectable for tests.
 
     Returns:
-        Mapping with :data:`KEY_ORDERS_PENDING`, :data:`KEY_ORDERS_FAILED_RECENT`,
-        and :data:`KEY_ORDERS_EXPIRING` (always present) and, when at
-        least one issued order carries an ``order_date``,
+        Mapping with :data:`KEY_ORDERS_UNISSUED`,
+        :data:`KEY_ORDERS_UNDOWNLOADED`, :data:`KEY_ORDERS_FAILED_RECENT`
+        and :data:`KEY_ORDERS_EXPIRING` (always present) and, when at least
+        one cert-bearing order carries an ``order_date``,
         :data:`KEY_ORDERS_DAYS_SINCE_ISSUED` (float days), all
         environment-keyed.
     """
     now = now or datetime.now(timezone.utc)
     failing_cutoff = now - timedelta(days=failing_lookback_days)
     expiry_cutoff = now + timedelta(days=cert_expiry_days)
+    # Both buckets hold orders the CA has generated a certificate for; only
+    # the download step differs, which cert expiry doesn't care about.
+    with_cert = [*buckets.issued, *buckets.undownloaded]
     metrics: dict[str, int | float] = {
-        # order_status != "Order Fulfilled" is a defensive re-check, not
-        # the primary filter — the pending-status query should already
-        # exclude fulfilled orders, but that filter's exact semantics are
-        # vendor-undocumented (see the module docstring's ADR note).
-        item_key(KEY_ORDERS_PENDING, env): sum(
-            1 for o in pending if o.order_status != "Order Fulfilled"
-        ),
+        # No re-filtering: bucket_orders already classified on the two
+        # typed fields the vendor's data supports checking programmatically.
+        item_key(KEY_ORDERS_UNISSUED, env): len(buckets.unissued),
+        item_key(KEY_ORDERS_UNDOWNLOADED, env): len(buckets.undownloaded),
         item_key(KEY_ORDERS_FAILED_RECENT, env): sum(
-            1 for o in failed if o.order_date is not None and o.order_date >= failing_cutoff
+            1 for o in buckets.failed
+            if o.order_date is not None and o.order_date >= failing_cutoff
         ),
         item_key(KEY_ORDERS_EXPIRING, env): sum(
-            1 for o in issued
+            1 for o in with_cert
             if o.certificate_expiry_date is not None and o.certificate_expiry_date <= expiry_cutoff
         ),
     }
-    issued_dates = [o.order_date for o in issued if o.order_date is not None]
+    issued_dates = [o.order_date for o in with_cert if o.order_date is not None]
     if issued_dates:
         days_since = (now - max(issued_dates)).total_seconds() / _SECONDS_PER_DAY
         metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, env)] = round(days_since, 2)

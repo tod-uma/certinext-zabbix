@@ -56,7 +56,8 @@ so a single Zabbix host can monitor both without collision.
 | `{$CERTINEXT.NODATA.FAST}` | `1h` | `nodata()` window for the frequent (domain-list) items — four missed 15-minute runs alerts. |
 | `{$CERTINEXT.NODATA.DAILY}` | `26h` | `nodata()` window for the daily expiry/order-health items — one missed daily run alerts. |
 | `{$CERTINEXT.UNVERIFIED.MAX_AGE}` | `1h` | How long a domain may stay unverified before the "stuck" trigger fires. |
-| `{$CERTINEXT.ORDER.STUCK_AGE}` | `24h` | How long an order may stay in a pending certificate status before the "stuck" trigger fires. |
+| `{$CERTINEXT.ORDER.STUCK_AGE}` | `24h` | How long an order may sit awaiting issuance (accepted, no certificate generated) before the "stuck" trigger fires. |
+| `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}` | `7d` | How long a generated certificate may sit undownloaded before its trigger fires. Longer than `STUCK_AGE`: a manual portal order can legitimately wait for collection, an ACME order should download within seconds. |
 
 ## Metrics (items)
 
@@ -68,15 +69,23 @@ Each exists twice — `[prod]` and `[sandbox]` — via the Zabbix key parameter.
 | `certinext.domains.unverified[<env>]` | Unsigned | Domains that are ACTIVE but not DCV-VERIFIED (PENDING/REJECTED), after `--domain-scope` filtering. |
 | `certinext.dcv.expiring[<env>]` | Unsigned | Verified domains in scope whose DCV expires within the pusher's `--expiry-days` lead time. |
 | `certinext.dcv.min_days_left[<env>]` | Float (days) | Days until the soonest DCV expiry across all verified domains in scope; negative once lapsed. |
-| `certinext.orders.pending[<env>]` | Unsigned | Orders currently in a pending certificate status (pending-dcv/pending-organization-verification/pending-csr/pending-documents/pending-agreement/pending-approval). |
-| `certinext.orders.failed_recent[<env>]` | Unsigned | Orders rejected, cancelled, expired, or revoked within the pusher's `--order-failing-lookback-days` window (default 30 days). |
-| `certinext.orders.days_since_issued[<env>]` | Float (days) | Days since the most recent order with an "issued" certificate status, by `order_date`. No trigger yet — see [Triggers](#triggers). |
+| `certinext.orders.unissued[<env>]` | Unsigned | Orders the CA has accepted but not yet generated a certificate for — still working through approval, DCV, CSR, documents, or the agreement. |
+| `certinext.orders.undownloaded[<env>]` | Unsigned | Orders whose certificate was generated but never downloaded — a delivery/automation failure rather than an issuance one. |
+| `certinext.orders.failed_recent[<env>]` | Unsigned | Orders in a terminal non-fulfilled state (cancelled, and by the catch-all rule any unrecognized `order_status`) dated within the pusher's `--order-failing-lookback-days` window (default 30 days). |
+| `certinext.orders.days_since_issued[<env>]` | Float (days) | Days since the CA most recently generated a certificate, by `order_date` — spans both downloaded and undownloaded certs. No trigger yet — see [Triggers](#triggers). |
+
+Neither order count is named "pending": the vendor's `status` enum uses
+`pending-*` for the whole pre-fulfillment space, which spans `unissued`
+**and** `undownloaded`, so reusing the word for either half alone would
+mislead anyone cross-referencing the API docs. The split keys on whether
+`certificate_expiry_date` is populated — a typed field, never the
+free-text `certificate_status` display string.
 
 The domain-list metrics (`total`, `unverified`) are pushed every frequent
 run; the expiry metrics (`expiring`, `min_days_left`) are pushed only by the
-daily run invoked with `--expiry-days`; the order-health metrics (`pending`,
-`failed_recent`, `days_since_issued`) are pushed only by the daily run
-invoked with `--order-health`.
+daily run invoked with `--expiry-days`; the order-health metrics
+(`unissued`, `undownloaded`, `failed_recent`, `days_since_issued`) are
+pushed only by the daily run invoked with `--order-health`.
 
 Order-health metrics deliberately avoid the vendor's free-text
 `certificate_status` field for classification — only the server-side
@@ -108,8 +117,14 @@ ships — expected, not a monitoring fault.
 | DCV expires within `{$CERTINEXT.DCV.HIGH_DAYS}` day(s) | HIGH | `min_days_left` ≤ `{$CERTINEXT.DCV.HIGH_DAYS}`; dependency-chained under DCV lapsed. |
 | DCV expires within `{$CERTINEXT.DCV.AVG_DAYS}` days | AVERAGE | `min_days_left` ≤ `{$CERTINEXT.DCV.AVG_DAYS}`; dependency-chained under HIGH. |
 | DCV expires within `{$CERTINEXT.DCV.WARN_DAYS}` days | WARNING | `min_days_left` ≤ `{$CERTINEXT.DCV.WARN_DAYS}`; dependency-chained under AVERAGE. |
-| order(s) stuck too long | AVERAGE | `pending` > 0 for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`. |
-| no data from pusher (daily order-health run) | WARNING | `nodata()` on `pending` for `{$CERTINEXT.NODATA.DAILY}` — prod only; ships DISABLED for sandbox until a sandbox daily schedule exists. |
+| order(s) stuck awaiting issuance | AVERAGE | `unissued` > 0 for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`. |
+| certificate(s) generated but never downloaded | WARNING | `undownloaded` > 0 for the whole of `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}`. |
+| no data from pusher (daily order-health run) | WARNING | `nodata()` on `unissued` for `{$CERTINEXT.NODATA.DAILY}` — prod only; ships DISABLED for sandbox until a sandbox daily schedule exists. |
+
+> **Before enabling notifications:** both order-stuck triggers compare
+> against zero, so they fire immediately against an account carrying a
+> backlog of abandoned orders from earlier experimentation. Cancel those
+> stale orders first, or the triggers will never clear.
 | recent order failure(s) | WARNING | `failed_recent` > 0 (already date-filtered by the pusher, so no Zabbix-side window needed). |
 
 The four DCV-expiry triggers are dependency-chained (most severe tier

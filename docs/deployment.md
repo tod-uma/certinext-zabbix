@@ -134,7 +134,8 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
 | `CERTINEXT_DOMAIN_SCOPE` | no | `top` | Which domains to monitor: `top`, `ns-boundary`, or `all` — see the CLI flag reference below |
 | `CERTINEXT_ORDER_HEALTH` | no | off | Enable the order-health metrics — see the CLI flag reference below |
-| `CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS` | no | `30` | Only count rejected/cancelled/expired/revoked orders from this many days back as "failed recently" |
+| `CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS` | no | `30` | Only count failed orders from this many days back as "failed recently" |
+| `CERTINEXT_ORDER_HISTORY_DAYS` | no | `1095` | Bound the orders-report fetch to this many days back — see the CLI flag reference below |
 | `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on JSON-lines DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
@@ -145,8 +146,9 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `--dry-run` | Compute and print the metrics without sending anything to Zabbix. Use for validation. |
 | `--domain-scope {top,ns-boundary,all}` | Which domains to monitor — applies to all four metrics, not just expiry. `top` (default) excludes any domain with a registered ancestor in the account (no DNS lookups). `ns-boundary` does the same but re-includes a domain with its own NS records (a real DNS zone cut). `all` restores the pre-`--domain-scope` unfiltered behavior. Switching away from `all` causes a one-time drop in `certinext.domains.total` — expected, not a fault. |
 | `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call per verified domain — schedule this on a daily run, not every 15 minutes). Disabled by default. |
-| `--order-health` | Also push the order-health metrics: orders stuck in a pending certificate status, orders that recently failed, and days since the last certificate was issued (several Orders Report list calls — schedule this on a daily run, not every 15 minutes). Disabled by default. |
-| `--order-failing-lookback-days DAYS` | Only count rejected/cancelled/expired/revoked orders from the last `DAYS` days toward the failed-recent metric; also bounds that report fetch to the same window. Default `30`. |
+| `--order-health` | Also push the order-health metrics: orders awaiting issuance, certificates generated but never downloaded, orders that recently failed, and days since the last certificate was issued (one Orders Report fetch, paginated — schedule this on a daily run, not every 15 minutes). Disabled by default. |
+| `--order-failing-lookback-days DAYS` | Only count failed orders from the last `DAYS` days toward the failed-recent metric. Default `30`. |
+| `--order-history-days DAYS` | Bound the orders-report fetch to the last `DAYS` days so it does not grow without limit as order history accumulates. Must stay comfortably longer than the longest certificate lifetime in the account — an issued cert older than this window drops out of `certinext.orders.expiring`. Public TLS certificates cap at 398 days, so the `1095` (3-year) default has ample margin. |
 | `--zabbix-server` / `--zabbix-port` / `--zabbix-host` / `--zabbix-timeout` | Override the matching environment variables above. |
 | `--sandbox` | Use the CertiNext **sandbox** API — see [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too). |
 | `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; logs are complete at default verbosity. |
@@ -167,8 +169,8 @@ deployment sequence:
 1. Import
    [templates/template_certinext/7.0/template_certinext.yaml](../templates/template_certinext/7.0/template_certinext.yaml)
    via *Data collection → Templates → Import*. It creates **CertiNext DCV
-   by Zabbix trapper**: fourteen trapper items (each metric twice, key-
-   parameterized `[prod]` / `[sandbox]`), twenty-two triggers (including a
+   by Zabbix trapper**: eighteen trapper items (each metric twice, key-
+   parameterized `[prod]` / `[sandbox]`), twenty-six triggers (including a
    per-environment DCV-expiry severity gradient — WARNING → AVERAGE →
    HIGH → DISASTER, dependency-chained so only the deepest tier alerts),
    and the macros. The three sandbox `nodata()` triggers ship **disabled**
@@ -186,13 +188,38 @@ deployment sequence:
    (*Alerts → Actions → Trigger actions*), add the condition *Tag value*
    | `env` | *does not equal* | `sandbox`. Sandbox problems then still
    appear in the UI but never page anyone.
+6. **Clear the abandoned-order backlog before enabling order-health
+   notifications** — see below.
+
+### Clear the abandoned-order backlog first
+
+Both order-stuck triggers compare against zero:
+
+- *order(s) stuck awaiting issuance* — `certinext.orders.unissued` > 0
+  for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`
+- *certificate(s) generated but never downloaded* —
+  `certinext.orders.undownloaded` > 0 for the whole of
+  `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}`
+
+An account that accumulated abandoned orders while people were still
+learning the CertiNext workflow will hold both counts permanently above
+zero, so both triggers fire on the first daily run and never clear. A
+100-row production sample taken 2026-08-07 showed 6 orders awaiting
+issuance and 11 certificates generated but never downloaded.
+
+Before enabling notifications for these two triggers, go through the
+account and cancel the orders that are genuinely dead, and download or
+cancel the generated-but-uncollected certificates. Run
+`certinext-zabbix-push --order-health --dry-run -v` to see the current
+counts without sending anything; the goal is a steady-state of zero (or a
+small number that clears on its own within the macro window).
 
 ## Two schedules
 
 | Run | Cadence | Command | Pushes |
 |---|---|---|---|
 | frequent | every 15 min | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
-| daily | once a day | `certinext-zabbix-push --expiry-days 14 --order-health` | additionally `certinext.dcv.expiring`, `certinext.dcv.min_days_left` (one detail call **per verified domain**) and `certinext.orders.pending`, `certinext.orders.failed_recent`, `certinext.orders.days_since_issued` (eleven Orders Report list calls) — never schedule either check frequently |
+| daily | once a day | `certinext-zabbix-push --expiry-days 14 --order-health` | additionally `certinext.dcv.expiring`, `certinext.dcv.min_days_left` (one detail call **per verified domain**) and `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch) — never schedule either check frequently |
 
 Pick an `--expiry-days` lead time that sits comfortably inside your own
 DCV-renewal automation's lead time, so this monitor firing means renewal
@@ -369,10 +396,11 @@ The DCV-expiry severity tiers are likewise macros
 (`{$CERTINEXT.DCV.WARN_DAYS}`, `AVG_DAYS`, `HIGH_DAYS`, `DISASTER_DAYS`)
 — tune them in Zabbix, no re-import needed; they are independent of the
 pusher's `--expiry-days` flag, which only controls the expiring-count
-metric. Likewise `{$CERTINEXT.ORDER.STUCK_AGE}` is independent of
+metric. Likewise `{$CERTINEXT.ORDER.STUCK_AGE}` and
+`{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}` are independent of
 `--order-failing-lookback-days`, which only controls the failed-recent
-metric (and, as of certinext-zabbix's date-bounded fetch, how far back
-that one report query looks). See the
+metric, and of `--order-history-days`, which only bounds how far back the
+report fetch reaches. See the
 [per-template README](../templates/template_certinext/7.0/README.md) for
 the full macro table.
 
