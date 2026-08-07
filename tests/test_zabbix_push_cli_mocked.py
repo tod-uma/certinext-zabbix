@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 from certinext.cli_support import LogFormat, LogMode
+from certinext.orders import OrderRecord
 from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
@@ -58,10 +59,27 @@ def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
     return domain
 
 
+def _order(order_status: str = "Order Accepted", order_date: str | None = None) -> OrderRecord:
+    """Build an OrderRecord from wire-format fields for order-health tests.
+
+    Args:
+        order_status: Value for the ``orderStatus`` wire field.
+        order_date: ISO timestamp for ``orderDate``, or None to omit it.
+
+    Returns:
+        A validated OrderRecord (no API client attached — field access only).
+    """
+    payload: dict[str, Any] = {"orderStatus": order_status}
+    if order_date is not None:
+        payload["orderDate"] = order_date
+    return OrderRecord.model_validate(payload)
+
+
 def _run(
     argv: list[str] | None = None,
     env: dict[str, str] | None = None,
     domains: list[Any] | None = None,
+    orders_by_status: dict[str, list[Any]] | None = None,
     response: Any = _OK_RESPONSE,
     sandbox: bool = False,
 ) -> tuple[Any, SimpleNamespace]:
@@ -69,8 +87,10 @@ def _run(
 
     resolve_connection / build_session / push_metrics / configure_logging are
     patched in the CLI module's namespace. The mocked session returns
-    *domains* (default empty), push_metrics returns *response*, and the
-    resolved connection reports *sandbox* (drives the [env] key parameter).
+    *domains* (default empty) and, for the orders accessor, looks up each
+    status query in *orders_by_status* (default: every status returns an
+    empty list). push_metrics returns *response*, and the resolved
+    connection reports *sandbox* (drives the [env] key parameter).
     ``ZABBIX_SERVER`` defaults to a test value since the CLI now requires it
     with no built-in default — pass ``env={"ZABBIX_SERVER": ...}`` to
     override, or ``env={"ZABBIX_SERVER": None}`` to unset it entirely.
@@ -80,6 +100,8 @@ def _run(
     """
     mock_sess = MagicMock()
     mock_sess.domain.get_list.return_value = domains if domains is not None else []
+    by_status = orders_by_status or {}
+    mock_sess.orders.get_list.side_effect = lambda status: by_status.get(status, [])
     mock_conn = MagicMock(sandbox=sandbox)
     full_env = {"ZABBIX_SERVER": _DEFAULT_TEST_SERVER, **(env or {})}
 
@@ -323,6 +345,102 @@ class TestExpiryPath:
             "Failed to refresh domain — unexpected error", exc_info=True, domain="weird.edu",
         )
         mocks.log.exception.assert_not_called()
+
+
+class TestOrderHealthPath:
+    """--order-health fetches the orders report and honors the skip policy."""
+
+    def test_order_health_metrics_included(self) -> None:
+        orders_by_status = {
+            "pending-dcv": [_order("Order Accepted")],
+            "rejected": [_order(order_date="2026-01-01T00:00:00")],
+            "issued": [_order(order_date="2026-01-01T00:00:00")],
+        }
+        result, mocks = _run(argv=["--order-health"], orders_by_status=orders_by_status)
+        assert result.exit_code == 0
+        (metrics,) = mocks.push.call_args.args
+        assert metrics["certinext.orders.pending[prod]"] == 1
+        assert "certinext.orders.failed_recent[prod]" in metrics
+        assert "certinext.orders.days_since_issued[prod]" in metrics
+
+    def test_without_flag_orders_not_fetched(self) -> None:
+        _, mocks = _run()
+        mocks.sess.orders.get_list.assert_not_called()
+
+    def test_fetches_all_documented_status_filters(self) -> None:
+        _, mocks = _run(argv=["--order-health"])
+        queried = {call.kwargs["status"] for call in mocks.sess.orders.get_list.call_args_list}
+        assert queried == {
+            "pending-dcv", "pending-organization-verification", "pending-csr",
+            "pending-documents", "pending-agreement", "pending-approval",
+            "rejected", "cancelled", "expired", "revoked",
+            "issued",
+        }
+
+    def test_lookback_flag_reaches_collect_order_metrics(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
+                   return_value={}) as mock_collect:
+            _run(argv=["--order-health", "--order-failing-lookback-days", "10"])
+        assert mock_collect.call_args.kwargs["failing_lookback_days"] == 10
+
+    def test_lookback_default_reaches_collect_order_metrics(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
+                   return_value={}) as mock_collect:
+            _run(argv=["--order-health"])
+        assert mock_collect.call_args.kwargs["failing_lookback_days"] == 30
+
+    def test_fetch_failure_skips_order_metrics_but_pushes_rest(self) -> None:
+        mock_sess = MagicMock()
+        mock_sess.domain.get_list.return_value = []
+        mock_sess.orders.get_list.side_effect = RuntimeError("api down")
+        with patch("certinext_zabbix.zabbix_push_cli.resolve_connection",
+                   return_value=MagicMock(sandbox=False)), \
+             patch("certinext_zabbix.zabbix_push_cli.build_session",
+                   return_value=mock_sess), \
+             patch("certinext_zabbix.zabbix_push_cli.push_metrics",
+                   return_value=_OK_RESPONSE) as mock_push, \
+             patch("certinext_zabbix.zabbix_push_cli.configure_logging"), \
+             patch("certinext_zabbix.zabbix_push_cli.log"):
+            result = runner.invoke(
+                app, ["--order-health"], env={"ZABBIX_SERVER": _DEFAULT_TEST_SERVER},
+            )
+        assert result.exit_code == 1
+        (metrics,) = mock_push.call_args.args
+        assert "certinext.orders.pending[prod]" not in metrics
+        assert metrics["certinext.domains.total[prod]"] == 0
+
+    def test_expected_fetch_error_logs_concisely_not_a_traceback(self) -> None:
+        exc = httpx.ReadTimeout("timed out")
+        mock_sess = MagicMock()
+        mock_sess.domain.get_list.return_value = []
+        mock_sess.orders.get_list.side_effect = exc
+        with patch("certinext_zabbix.zabbix_push_cli.resolve_connection",
+                   return_value=MagicMock(sandbox=False)), \
+             patch("certinext_zabbix.zabbix_push_cli.build_session",
+                   return_value=mock_sess), \
+             patch("certinext_zabbix.zabbix_push_cli.push_metrics",
+                   return_value=_OK_RESPONSE), \
+             patch("certinext_zabbix.zabbix_push_cli.configure_logging"), \
+             patch("certinext_zabbix.zabbix_push.time.sleep"), \
+             patch("certinext_zabbix.zabbix_push_cli.log") as mock_log:
+            result = runner.invoke(
+                app, ["--order-health"], env={"ZABBIX_SERVER": _DEFAULT_TEST_SERVER},
+            )
+        assert result.exit_code == 1
+        mock_log.warning.assert_any_call(
+            "Failed to fetch orders report", **_caught_kwargs(exc),
+        )
+        mock_log.exception.assert_not_called()
+
+    def test_uses_expiry_lock_tier_not_a_third_lock(self) -> None:
+        held = run_lock("certinext_zabbix_push_prod_expiry")
+        held.acquire()
+        try:
+            result, mocks = _run(argv=["--order-health"])
+        finally:
+            held.release(force=True)
+        assert result.exit_code == 0
+        mocks.push.assert_not_called()
 
 
 class TestZabbixUnreachable:

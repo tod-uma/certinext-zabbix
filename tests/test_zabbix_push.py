@@ -5,7 +5,7 @@ time, so the metric math is deterministic and offline. The trapper send is
 covered by patching the Sender class — no sockets are opened.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +13,7 @@ import httpx
 import pytest
 from certinext.exceptions import CertiNextAPIError
 from certinext.models.domains import Domain
+from certinext.orders import OrderRecord
 from zabbix_utils.exceptions import ProcessingError
 
 from certinext_zabbix.zabbix_push import (
@@ -20,11 +21,16 @@ from certinext_zabbix.zabbix_push import (
     ENV_SANDBOX,
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
+    KEY_ORDERS_DAYS_SINCE_ISSUED,
+    KEY_ORDERS_FAILED_RECENT,
+    KEY_ORDERS_PENDING,
     KEY_TOTAL,
     KEY_UNVERIFIED,
     DomainScope,
     collect_domain_metrics,
     collect_expiry_metrics,
+    collect_order_metrics,
+    fetch_orders_by_status,
     item_key,
     push_metrics,
     refresh_domain,
@@ -143,6 +149,108 @@ class TestCollectExpiryMetrics:
         assert collect_expiry_metrics([], 14, ENV_SANDBOX, now=_NOW) == {
             "certinext.dcv.expiring[sandbox]": 0,
         }
+
+
+def _order(
+    order_status: str = "Order Accepted",
+    order_date: str | None = None,
+) -> OrderRecord:
+    """Build an OrderRecord from wire-format fields for order-health tests.
+
+    Args:
+        order_status: Value for the ``orderStatus`` wire field.
+        order_date: ISO timestamp for ``orderDate``, or None to omit it.
+
+    Returns:
+        A validated OrderRecord (no API client attached — field access only).
+    """
+    payload: dict[str, Any] = {"orderStatus": order_status}
+    if order_date is not None:
+        payload["orderDate"] = order_date
+    return OrderRecord.model_validate(payload)
+
+
+class TestFetchOrdersByStatus:
+    """Multi-status fetch concatenates pages and retries per status."""
+
+    def test_concatenates_across_statuses(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = [[_order()], [_order(), _order()]]
+        records = fetch_orders_by_status(accessor, ("pending-dcv", "pending-csr"))
+        assert len(records) == 3
+        assert accessor.get_list.call_args_list == [
+            ((), {"status": "pending-dcv"}),
+            ((), {"status": "pending-csr"}),
+        ]
+
+    def test_retries_transient_failure_then_succeeds(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = [httpx.ReadTimeout("timed out"), [_order()]]
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            records = fetch_orders_by_status(accessor, ("issued",))
+        assert len(records) == 1
+        mock_sleep.assert_called_once_with(5.0)
+
+    def test_exhausts_attempts_and_raises_without_trying_next_status(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = CertiNextAPIError(503, "service unavailable")
+        with patch("certinext_zabbix.zabbix_push.time.sleep"), \
+             pytest.raises(CertiNextAPIError):
+            fetch_orders_by_status(accessor, ("rejected", "cancelled"), attempts=2, retry_delay=0.1)
+        # Only the first status was attempted — a fetch failure must not
+        # silently under-report by skipping ahead to the remaining statuses.
+        assert {call.kwargs["status"] for call in accessor.get_list.call_args_list} == {"rejected"}
+
+
+class TestCollectOrderMetrics:
+    """Pending/failed-recent counts and days-since-issued from order buckets."""
+
+    def test_pending_excludes_fulfilled_defensively(self) -> None:
+        pending = [_order("Order Accepted"), _order("Order Fulfilled")]
+        metrics = collect_order_metrics(pending, [], [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert metrics[item_key(KEY_ORDERS_PENDING, ENV_PROD)] == 1
+
+    def test_failed_recent_excludes_orders_outside_lookback(self) -> None:
+        failed = [
+            _order(order_date="2026-07-01T00:00:00"),   # 12d old — within 30d lookback
+            _order(order_date="2025-01-01T00:00:00"),    # ancient — outside lookback
+        ]
+        metrics = collect_order_metrics([], failed, [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+
+    def test_failed_recent_boundary_day_counts(self) -> None:
+        failed = [_order(order_date="2026-06-13T12:00:00")]  # exactly 30d before _NOW
+        metrics = collect_order_metrics([], failed, [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+
+    def test_days_since_issued_uses_max_order_date(self) -> None:
+        issued = [
+            _order(order_date="2026-07-10T12:00:00"),  # 3d ago
+            _order(order_date="2026-07-01T12:00:00"),  # 12d ago — not the max
+        ]
+        metrics = collect_order_metrics([], [], issued, ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
+
+    def test_no_issued_orders_omits_days_since_issued(self) -> None:
+        metrics = collect_order_metrics([], [], [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+
+    def test_issued_order_with_no_order_date_is_excluded(self) -> None:
+        metrics = collect_order_metrics([], [], [_order()], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+
+    def test_sandbox_env_reaches_keys(self) -> None:
+        metrics = collect_order_metrics([], [], [], ENV_SANDBOX, failing_lookback_days=30, now=_NOW)
+        assert metrics == {
+            item_key(KEY_ORDERS_PENDING, ENV_SANDBOX): 0,
+            item_key(KEY_ORDERS_FAILED_RECENT, ENV_SANDBOX): 0,
+        }
+
+    def test_defaults_now_to_current_time(self) -> None:
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        issued = [_order(order_date=recent.isoformat())]
+        metrics = collect_order_metrics([], [], issued, ENV_PROD, failing_lookback_days=30)
+        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == pytest.approx(1.0, abs=0.01)
 
 
 class TestPushMetrics:
