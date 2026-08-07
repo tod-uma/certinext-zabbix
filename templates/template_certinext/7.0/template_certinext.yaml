@@ -31,11 +31,15 @@ zabbix_export:
       per environment via key parameters ([prod] / [sandbox]); the pusher
       picks the parameter from its CertiNext connection. Two schedules
       feed each environment: a frequent run (domain totals) and a daily
-      run with --expiry-days (DCV expiry). nodata() triggers catch a dead
-      pusher. DCV expiry alerts escalate through a severity gradient on
-      min_days_left (WARNING 14d → AVERAGE 7d → HIGH 1d → DISASTER
-      lapsed, thresholds in the {$CERTINEXT.DCV.*_DAYS} macros),
-      dependency-chained so only the most severe tier fires.
+      run with --expiry-days and/or --order-health (DCV expiry and order
+      health). nodata() triggers catch a dead pusher. DCV expiry alerts
+      escalate through a severity gradient on min_days_left (WARNING 14d
+      → AVERAGE 7d → HIGH 1d → DISASTER lapsed, thresholds in the
+      {$CERTINEXT.DCV.*_DAYS} macros), dependency-chained so only the
+      most severe tier fires. Order-health alerts on orders stuck past
+      {$CERTINEXT.ORDER.STUCK_AGE} and orders that recently failed
+      (rejected/cancelled/expired/revoked); days-since-last-issued is
+      pushed with no trigger yet, pending a baseline of normal cadence.
 
       Every item and trigger is tagged env:prod or env:sandbox — filter
       notification actions on that tag to keep sandbox problems silent.
@@ -232,6 +236,103 @@ zabbix_export:
         tags:
         - tag: env
           value: prod
+        # ------------------------------------------------ order health ---
+        # Orders Report metrics (--order-health on the daily pusher run).
+        # Deliberately does not use certificate_status (a vendor free-text
+        # display string) for classification — only the server-side status
+        # filter and order_status, the one field confirmed reliable against
+        # live data. See certinext_zabbix.zabbix_push's module docstring.
+    - uuid: 36fcfa47611941048ec7e3604f1f9e93
+      name: 'CertiNext prod: Orders pending'
+      type: TRAP
+      key: 'certinext.orders.pending[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Orders currently in a pending certificate status (pending-dcv,
+        pending-organization-verification, pending-csr, pending-documents,
+        pending-agreement, or pending-approval). Nonzero is normal briefly
+        while an order works through issuance; sustained nonzero means an
+        order is stuck.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 3d57df86a88f4fc2acc0b29ad6698d26
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.pending[prod],{$CERTINEXT.ORDER.STUCK_AGE})>0'
+        name: 'CertiNext prod: order(s) stuck too long'
+        opdata: 'pending: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          At least one order has been pending for the whole of
+          {$CERTINEXT.ORDER.STUCK_AGE}. Check the account in CertiNext for
+          which order and lifecycle step is stuck (CSR not submitted,
+          agreement not accepted, approval pending, etc.).
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 8d293822e167437e9d51288da3303c24
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.pending[prod],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext prod: no data from pusher (daily order-health run)'
+        priority: WARNING
+        description: |
+          No value received for {$CERTINEXT.NODATA.DAILY} — the
+          --order-health daily timer is dead, erroring before the send, or
+          the CertiNext API has been down across several runs. Check the
+          timer and its journal on the sending host.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: 69c512fd0a1540bc947a2e62242709fe
+      name: 'CertiNext prod: Orders failed recently'
+      type: TRAP
+      key: 'certinext.orders.failed_recent[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Orders rejected, cancelled, expired, or revoked within the
+        pusher's --order-failing-lookback-days window (default 30 days).
+        Older failures are normal account history and are excluded —
+        this is meant to flag a *recent* failure, not accumulate forever.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 9102245241324df4b0904326a11308c9
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.failed_recent[prod])>0'
+        name: 'CertiNext prod: recent order failure(s)'
+        opdata: 'failed recently: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          At least one order was rejected, cancelled, expired, or revoked
+          within the lookback window. Check the account in CertiNext for
+          which order and why.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: 025434e05c904e598dae9654d37c3675
+      name: 'CertiNext prod: Days since last certificate issued'
+      type: TRAP
+      key: 'certinext.orders.days_since_issued[prod]'
+      delay: '0'
+      value_type: FLOAT
+      units: d
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days since the most recent order with an "issued" certificate
+        status, by order_date. No severity trigger yet — this item is
+        intentionally trigger-less until there's enough history to know
+        what a normal issuance cadence looks like for this account; see
+        docs/wishlist/IDEA-003-days-since-issued-alert-threshold.md.
+        Absent when no order in the "issued" status filter carries a
+        parseable order_date.
+      tags:
+      - tag: env
+        value: prod
         # ---------------------------------------------------- sandbox ---
         # Mirror of the prod items/triggers with the [sandbox] key
         # parameter and env:sandbox tags. Same severities — mute the
@@ -407,6 +508,89 @@ zabbix_export:
         tags:
         - tag: env
           value: sandbox
+        # ------------------------------------------------ order health ---
+    - uuid: 1a7c3c5a63bc487b971b783d87a804c1
+      name: 'CertiNext sandbox: Orders pending'
+      type: TRAP
+      key: 'certinext.orders.pending[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox orders currently in a pending certificate status. Often a
+        deliberate test state.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: d223f5b2d3764be7a29f4d64fc0ed04e
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.pending[sandbox],{$CERTINEXT.ORDER.STUCK_AGE})>0'
+        name: 'CertiNext sandbox: order(s) stuck too long'
+        opdata: 'pending: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          Sandbox order(s) pending for the whole of
+          {$CERTINEXT.ORDER.STUCK_AGE}. Often a deliberate test state —
+          notifications for env:sandbox should be muted at the action
+          level.
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: a6e206d90e194da09133c5dde105b233
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.pending[sandbox],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext sandbox: no data from pusher (daily order-health run)'
+        status: DISABLED
+        priority: WARNING
+        description: |
+          No sandbox value received for {$CERTINEXT.NODATA.DAILY}. Ships
+          DISABLED because nodata() fires even for items that have never
+          received data — enable this trigger once a sandbox
+          --order-health daily run is actually scheduled.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: e7281e82ec8444ee9fdc8ba6f0f689d6
+      name: 'CertiNext sandbox: Orders failed recently'
+      type: TRAP
+      key: 'certinext.orders.failed_recent[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox orders rejected, cancelled, expired, or revoked within
+        the pusher's --order-failing-lookback-days window.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 45a5488b5ce14153be4c4afd78b266d2
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.failed_recent[sandbox])>0'
+        name: 'CertiNext sandbox: recent order failure(s)'
+        opdata: 'failed recently: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          Sandbox order(s) rejected, cancelled, expired, or revoked within
+          the lookback window. Often a deliberate test state.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: 765bf06a961d4be8ae7982e3525be5b3
+      name: 'CertiNext sandbox: Days since last certificate issued'
+      type: TRAP
+      key: 'certinext.orders.days_since_issued[sandbox]'
+      delay: '0'
+      value_type: FLOAT
+      units: d
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days since the most recent sandbox order with an "issued"
+        certificate status. No severity trigger yet — same deferral as
+        the prod item.
+      tags:
+      - tag: env
+        value: sandbox
     macros:
     - macro: '{$CERTINEXT.DCV.AVG_DAYS}'
       value: '7'
@@ -426,6 +610,9 @@ zabbix_export:
     - macro: '{$CERTINEXT.NODATA.FAST}'
       value: 13h
       description: 'nodata() window for the frequent items — one missed 6-hour run tolerated, two alert'
+    - macro: '{$CERTINEXT.ORDER.STUCK_AGE}'
+      value: 24h
+      description: 'How long an order may stay in a pending certificate status before the "stuck" trigger fires'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'

@@ -15,7 +15,7 @@
 .DESCRIPTION
     Creates/updates:
       - "CertiNext Zabbix Push"          — every 15 minutes, indefinitely
-      - "CertiNext Zabbix Push - Expiry" — once daily, with --expiry-days 14
+      - "CertiNext Zabbix Push - Expiry" — once daily, with --expiry-days 14 --order-health
 
     Both tasks run Invoke-CertinextZabbixPush.ps1 (in this directory),
     which loads the env file and calls certinext-zabbix-push.exe. Both
@@ -125,11 +125,11 @@ Register-PushTask -TaskName "CertiNext Zabbix Push" `
     -Description "Push CertiNext DCV health metrics to Zabbix (frequent)" `
     -Trigger $frequentTrigger -PushArgs @()
 
-# Daily expiry run.
+# Daily expiry + order-health run.
 $dailyTrigger = New-ScheduledTaskTrigger -Daily -At "03:12"
 Register-PushTask -TaskName "CertiNext Zabbix Push - Expiry" `
-    -Description "Push CertiNext DCV expiry metrics to Zabbix (daily)" `
-    -Trigger $dailyTrigger -PushArgs @("--expiry-days", "14")
+    -Description "Push CertiNext DCV expiry and order-health metrics to Zabbix (daily)" `
+    -Trigger $dailyTrigger -PushArgs @("--expiry-days", "14", "--order-health")
 
 Write-Host "Registered 'CertiNext Zabbix Push' and 'CertiNext Zabbix Push - Expiry' as $ServiceAccount."
 Write-Host "Verify with: Get-ScheduledTaskInfo -TaskName 'CertiNext Zabbix Push'"
