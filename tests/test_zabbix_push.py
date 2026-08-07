@@ -385,6 +385,32 @@ class TestPushMetricsRetry:
         assert result is response
         assert mock_sender.send.call_count == 2
 
+    def test_redirect_loop_is_not_retried_and_names_the_cause(self) -> None:
+        # zabbix_utils follows a proxy-group redirect by unbounded recursion, so
+        # a proxy redirecting to its own address blows the stack. Retrying would
+        # replay a ~1000-connection storm against an already-struggling proxy,
+        # and a bare RecursionError leaves the operator a traceback whose
+        # innermost frames are unrelated to the fault.
+        mock_sender = MagicMock()
+        mock_sender.send.side_effect = RecursionError(
+            "maximum recursion depth exceeded in comparison"
+        )
+        with patch("certinext_zabbix.zabbix_push.Sender", return_value=mock_sender), \
+             patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep, \
+             pytest.raises(ProcessingError, match="Redirect loop") as excinfo:
+            push_metrics(
+                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
+                attempts=3, retry_delay=0.1,
+            )
+
+        assert mock_sender.send.call_count == 1, "a redirect loop must not be retried"
+        assert mock_sleep.call_count == 0
+        # The endpoint is named, so the operator knows which one to look at.
+        assert "zbx.example.edu:10051" in str(excinfo.value)
+        # The original RecursionError stays reachable for the debug sidecar.
+        assert isinstance(excinfo.value.__cause__, RecursionError)
+
     def test_rejected_values_are_not_retried(self) -> None:
         # failed > 0 means the server rejected values (bad host/key/allowed
         # hosts) — a retry cannot fix configuration, so exactly one send.

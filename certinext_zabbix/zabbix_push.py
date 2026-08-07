@@ -432,7 +432,8 @@ def push_metrics(
 
     Raises:
         zabbix_utils.exceptions.ProcessingError: When the server response
-            cannot be obtained or parsed on the final attempt.
+            cannot be obtained or parsed on the final attempt, or when a
+            proxy-group redirect loop exhausted the recursion limit (see below).
         OSError: When the connection fails at the socket level on the final
             attempt.
     """
@@ -442,6 +443,29 @@ def push_metrics(
             # A fresh Sender per attempt — the previous one's socket state is
             # unknown after a failure.
             return Sender(server=server, port=port, timeout=timeout).send(items)
+        except RecursionError as exc:
+            # zabbix_utils follows a Zabbix 7.0 proxy-group redirect by calling
+            # Sender.__send_to_cluster recursively, with no hop limit and no
+            # loop detection. A proxy that redirects to its own address — which
+            # a misconfigured proxy group really does, observed 965 times in one
+            # second against lv-o-zabbix-proxy03 — recurses until the stack ends.
+            #
+            # Not retried, and deliberately re-raised as ProcessingError rather
+            # than left as RecursionError: retrying replays the whole connection
+            # storm against an already-struggling proxy, and the caller's
+            # existing ProcessingError branch gives a clean exit instead of an
+            # unhandled stack. Today RecursionError escapes the retry loop
+            # anyway (it is not a ProcessingError or OSError), so this changes
+            # the message rather than the control flow — but it pins that, and
+            # replaces a traceback whose innermost frames are unrelated to the
+            # cause with something an operator can act on.
+            raise ProcessingError(
+                f"Redirect loop sending to {server}:{port} — the Zabbix endpoint "
+                "kept redirecting to an address that redirects back to itself, "
+                "until the recursion limit was hit. Check the proxy group's "
+                "per-proxy 'Address for active agents' settings, or point "
+                "--zabbix-server directly at the proxy that owns this host."
+            ) from exc
         except (ProcessingError, OSError):
             if attempt >= attempts:
                 raise

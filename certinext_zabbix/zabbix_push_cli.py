@@ -414,13 +414,16 @@ def run(
         sys.stderr.write("\n")
         interrupted = True
     except (RuntimeError, CertiNextAPIError) as exc:
+        # include_traceback: this handler wraps the whole run, so it fires at
+        # most once — unlike the per-domain calls above, which must stay
+        # concise or one systemic failure dumps a stack per domain (ADR 0014).
         had_errors = True
-        log_caught_exception(log, "Unexpected error", exc)
+        log_caught_exception(log, "Unexpected error", exc, include_traceback=True)
     except Exception as exc:
         # Catches anything not already handled above (e.g. domain listing
         # itself failing).
         had_errors = True
-        log_caught_exception(log, "Unexpected error", exc)
+        log_caught_exception(log, "Unexpected error", exc, include_traceback=True)
     finally:
         if lock is not None:
             lock.release(force=True)
