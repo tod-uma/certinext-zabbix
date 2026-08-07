@@ -204,8 +204,10 @@ Both order-stuck triggers compare against zero:
 An account that accumulated abandoned orders while people were still
 learning the CertiNext workflow will hold both counts permanently above
 zero, so both triggers fire on the first daily run and never clear. A
-100-row production sample taken 2026-08-07 showed 6 orders awaiting
-issuance and 11 certificates generated but never downloaded.
+full-report production measurement on 2026-08-07 (all 163 rows, not a
+sample) showed **24** orders awaiting issuance — median age 63 days, 18
+of them older than 30 days — and **13** certificates generated but never
+downloaded.
 
 Before enabling notifications for these two triggers, go through the
 account and cancel the orders that are genuinely dead, and download or

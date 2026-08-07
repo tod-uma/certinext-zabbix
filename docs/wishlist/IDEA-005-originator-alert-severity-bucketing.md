@@ -2,7 +2,12 @@
 
 - **Status:** Proposed
 - **Created:** 2026-08-08
-- **Updated:** 2026-08-08
+- **Updated:** 2026-08-07
+
+> **This idea is now a prerequisite, not just an enhancement.**
+> [ADR 0008](../adr/0008-orders-expiring-ships-data-only.md) ships
+> `certinext.orders.expiring` with no trigger and defers the trigger
+> decision to this idea. See "Prod evidence (2026-08-07)" below.
 
 ## Context
 
@@ -13,7 +18,7 @@ the account, regardless of how it got there. But the orders come from
 channels with very different expectations:
 
 | `originator` | prod share (100-row sample, 2026-08-07) | expectation |
-|---|---|---|
+| --- | --- | --- |
 | `ACME` | 57 | fully automated — an order should go from submitted to downloaded within seconds. Anything stuck is a broken client. |
 | `CERTInext` | 39 | a human in the portal — can legitimately sit for hours or days awaiting an approver. |
 | `CERTInext API` | 4 | scripted, but not necessarily unattended. |
@@ -33,6 +38,34 @@ on every row of a fresh 462-row prod sample; a prod fixture predating that
 date showed it as always `None`, and `certinext`'s
 `test_probe_r16_orders_originator_populated` guards against a regression
 back to that state.
+
+## Prod evidence (2026-08-07)
+
+A read-only measurement of the production account added a second, stronger
+driver than the stuck-age tuning conflict described above: **expiry
+monitoring is meaningless without this split.**
+
+- Prod certificate lifetimes are bimodal — 61 of 130 cert-bearing orders
+  are ~30-day, 62 are ~199-day. The ~30-day population is overwhelmingly
+  ACME.
+- A 30-day certificate is inside a 30-day expiry window from the moment
+  it is issued, so `certinext.orders.expiring` counts healthy,
+  freshly-renewed ACME certs. `lv-o-swdist02.its.maine.edu` was counted
+  two days after a successful renewal.
+- Correlating by common name, **all 3 genuinely-lapsed certificates
+  (newest cert for their CN, already expired) are `CERTInext API`
+  originator. None are ACME.**
+
+The operational reason is that ACME certificate expiry is **already
+monitored by other means**. The uncovered risk is a certificate obtained
+manually — through the portal or a one-off API call — that nobody renewed.
+That is precisely an originator distinction, which makes ACME-vs-REST-vs-portal
+the axis this metric needs before any trigger on it can mean anything.
+
+This suggests the class split wanted here is at least three-way
+(ACME / API / portal), not the two-way automated-vs-manual split sketched
+below — and that the split should apply to expiry metrics, not only the
+stuck-order counts.
 
 ## The idea
 
