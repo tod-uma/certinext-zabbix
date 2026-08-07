@@ -145,7 +145,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `--domain-scope {top,ns-boundary,all}` | Which domains to monitor — applies to all four metrics, not just expiry. `top` (default) excludes any domain with a registered ancestor in the account (no DNS lookups). `ns-boundary` does the same but re-includes a domain with its own NS records (a real DNS zone cut). `all` restores the pre-`--domain-scope` unfiltered behavior. Switching away from `all` causes a one-time drop in `certinext.domains.total` — expected, not a fault. |
 | `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call per verified domain — schedule this on a daily run, not every 15 minutes). Disabled by default. |
 | `--order-health` | Also push the order-health metrics: orders stuck in a pending certificate status, orders that recently failed, and days since the last certificate was issued (several Orders Report list calls — schedule this on a daily run, not every 15 minutes). Disabled by default. |
-| `--order-failing-lookback-days DAYS` | Only count rejected/cancelled/expired/revoked orders from the last `DAYS` days toward the failed-recent metric. Default `30`. |
+| `--order-failing-lookback-days DAYS` | Only count rejected/cancelled/expired/revoked orders from the last `DAYS` days toward the failed-recent metric; also bounds that report fetch to the same window. Default `30`. |
 | `--zabbix-server` / `--zabbix-port` / `--zabbix-host` / `--zabbix-timeout` | Override the matching environment variables above. |
 | `--sandbox` | Use the CertiNext **sandbox** API — see [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too). |
 | `-v` / `-vvv` / `-vvvv` | Verbosity: config details / script debug / third-party debug. Not needed in production; logs are complete at default verbosity. |
@@ -351,7 +351,8 @@ The DCV-expiry severity tiers are likewise macros
 pusher's `--expiry-days` flag, which only controls the expiring-count
 metric. Likewise `{$CERTINEXT.ORDER.STUCK_AGE}` is independent of
 `--order-failing-lookback-days`, which only controls the failed-recent
-metric. See the
+metric (and, as of certinext-zabbix's date-bounded fetch, how far back
+that one report query looks). See the
 [per-template README](../templates/template_certinext/7.0/README.md) for
 the full macro table.
 

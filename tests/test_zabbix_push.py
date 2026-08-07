@@ -5,7 +5,7 @@ time, so the metric math is deterministic and offline. The trapper send is
 covered by patching the Sender class — no sockets are opened.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -185,8 +185,18 @@ class TestFetchOrdersByStatus:
         records = fetch_orders_by_status(accessor, ("pending-dcv", "pending-csr"))
         assert len(records) == 3
         assert accessor.get_list.call_args_list == [
-            ((), {"status": "pending-dcv"}),
-            ((), {"status": "pending-csr"}),
+            ((), {"status": "pending-dcv", "since": None}),
+            ((), {"status": "pending-csr", "since": None}),
+        ]
+
+    def test_since_passed_through_to_every_status(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = [[_order()], [_order()]]
+        cutoff = date(2026, 7, 1)
+        fetch_orders_by_status(accessor, ("rejected", "cancelled"), since=cutoff)
+        assert accessor.get_list.call_args_list == [
+            ((), {"status": "rejected", "since": cutoff}),
+            ((), {"status": "cancelled", "since": cutoff}),
         ]
 
     def test_retries_transient_failure_then_succeeds(self) -> None:

@@ -29,7 +29,7 @@ Three metric families, matching the three designed checks:
 
 import time
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
 import httpx
@@ -257,6 +257,7 @@ def fetch_orders_by_status(
     orders: OrderAccessor,
     statuses: Sequence[str],
     *,
+    since: date | None = None,
     attempts: int = 3,
     retry_delay: float = 5.0,
 ) -> list[OrderRecord]:
@@ -271,6 +272,12 @@ def fetch_orders_by_status(
         orders: The session's order accessor (``sess.orders``).
         statuses: Vendor status-filter values to query, e.g.
             :data:`PENDING_CERTIFICATE_STATUSES`.
+        since: Optional start date (inclusive), passed through to
+            :meth:`OrderAccessor.get_list` as its ``since`` param on every
+            status. Only pass this for a bucket whose caller already
+            discards anything older client-side (e.g. the failed-recent
+            lookback) — bounding a bucket the caller needs full history
+            for (pending, issued) would silently undercount.
         attempts: Total tries per status (>= 1) before re-raising.
         retry_delay: Seconds to wait between tries.
 
@@ -285,7 +292,7 @@ def fetch_orders_by_status(
     for status in statuses:
         for attempt in range(1, attempts + 1):
             try:
-                records.extend(orders.get_list(status=status))
+                records.extend(orders.get_list(status=status, since=since))
                 break
             except (CertiNextAPIError, httpx.HTTPError):
                 if attempt >= attempts:

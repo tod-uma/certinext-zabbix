@@ -37,6 +37,7 @@ import os
 import socket
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
 import httpx
@@ -156,7 +157,8 @@ def run(
         help=(
             "Only count rejected/cancelled/expired/revoked orders from the "
             "last DAYS days toward the failed-recent metric — older "
-            "history is normal, not something to alert on forever."
+            "history is normal, not something to alert on forever. Also "
+            "bounds the report fetch itself to this window."
         ),
     )] = 30,
     order_cert_expiry_days: Annotated[int, typer.Option(
@@ -333,8 +335,20 @@ def run(
             failed_orders: list[OrderRecord] = []
             issued_orders: list[OrderRecord] = []
             try:
+                # Only the failed bucket is date-bounded server-side: it's
+                # the one collect_order_metrics already discards anything
+                # older than failing_lookback_days for client-side, so the
+                # since= filter is a pure fetch-volume optimization, not a
+                # behavior change. Pending and issued stay unbounded — a
+                # stuck order or a long-lived cert's expiry can't be
+                # assumed to fall within any fixed lookback window.
+                failing_since = (
+                    datetime.now(timezone.utc) - timedelta(days=order_failing_lookback_days)
+                ).date()
                 pending_orders = fetch_orders_by_status(sess.orders, PENDING_CERTIFICATE_STATUSES)
-                failed_orders = fetch_orders_by_status(sess.orders, FAILED_CERTIFICATE_STATUSES)
+                failed_orders = fetch_orders_by_status(
+                    sess.orders, FAILED_CERTIFICATE_STATUSES, since=failing_since,
+                )
                 issued_orders = fetch_orders_by_status(sess.orders, ("issued",))
             except (CertiNextAPIError, httpx.HTTPError) as exc:
                 # Same skip-rather-than-undercount policy as the expiry

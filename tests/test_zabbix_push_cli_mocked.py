@@ -9,7 +9,7 @@ or network are touched.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -101,7 +101,7 @@ def _run(
     mock_sess = MagicMock()
     mock_sess.domain.get_list.return_value = domains if domains is not None else []
     by_status = orders_by_status or {}
-    mock_sess.orders.get_list.side_effect = lambda status: by_status.get(status, [])
+    mock_sess.orders.get_list.side_effect = lambda status, since=None: by_status.get(status, [])
     mock_conn = MagicMock(sandbox=sandbox)
     full_env = {"ZABBIX_SERVER": _DEFAULT_TEST_SERVER, **(env or {})}
 
@@ -383,6 +383,25 @@ class TestOrderHealthPath:
                    return_value={}) as mock_collect:
             _run(argv=["--order-health", "--order-failing-lookback-days", "10"])
         assert mock_collect.call_args.kwargs["failing_lookback_days"] == 10
+
+    def test_lookback_bounds_only_the_failed_status_fetch(self) -> None:
+        """Only the failed-recent statuses (rejected/cancelled/expired/
+        revoked) get a since= cutoff derived from the lookback flag —
+        pending and issued must stay unbounded (see fetch_orders_by_status's
+        docstring for why bounding those would silently undercount)."""
+        _, mocks = _run(argv=["--order-health", "--order-failing-lookback-days", "10"])
+        since_by_status = {
+            call.kwargs["status"]: call.kwargs["since"]
+            for call in mocks.sess.orders.get_list.call_args_list
+        }
+        expected_since = (datetime.now(timezone.utc) - timedelta(days=10)).date()
+        for status in ("rejected", "cancelled", "expired", "revoked"):
+            assert since_by_status[status] == expected_since
+        for status in (
+            "pending-dcv", "pending-organization-verification", "pending-csr",
+            "pending-documents", "pending-agreement", "pending-approval", "issued",
+        ):
+            assert since_by_status[status] is None
 
     def test_lookback_default_reaches_collect_order_metrics(self) -> None:
         with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
