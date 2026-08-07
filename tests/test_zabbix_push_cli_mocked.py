@@ -361,6 +361,7 @@ class TestOrderHealthPath:
         (metrics,) = mocks.push.call_args.args
         assert metrics["certinext.orders.pending[prod]"] == 1
         assert "certinext.orders.failed_recent[prod]" in metrics
+        assert "certinext.orders.expiring[prod]" in metrics
         assert "certinext.orders.days_since_issued[prod]" in metrics
 
     def test_without_flag_orders_not_fetched(self) -> None:
@@ -388,6 +389,18 @@ class TestOrderHealthPath:
                    return_value={}) as mock_collect:
             _run(argv=["--order-health"])
         assert mock_collect.call_args.kwargs["failing_lookback_days"] == 30
+
+    def test_cert_expiry_flag_reaches_collect_order_metrics(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
+                   return_value={}) as mock_collect:
+            _run(argv=["--order-health", "--order-cert-expiry-days", "60"])
+        assert mock_collect.call_args.kwargs["cert_expiry_days"] == 60
+
+    def test_cert_expiry_default_reaches_collect_order_metrics(self) -> None:
+        with patch("certinext_zabbix.zabbix_push_cli.collect_order_metrics",
+                   return_value={}) as mock_collect:
+            _run(argv=["--order-health"])
+        assert mock_collect.call_args.kwargs["cert_expiry_days"] == 30
 
     def test_fetch_failure_skips_order_metrics_but_pushes_rest(self) -> None:
         mock_sess = MagicMock()

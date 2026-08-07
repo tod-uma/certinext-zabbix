@@ -312,6 +312,37 @@ zabbix_export:
         tags:
         - tag: env
           value: prod
+    - uuid: aa38ebcda1ae44b68e40ba79a466f9a9
+      name: 'CertiNext prod: Issued certificates expiring soon'
+      type: TRAP
+      key: 'certinext.orders.expiring[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Issued orders whose certificate_expiry_date falls within the
+        pusher's --order-cert-expiry-days (including already-expired).
+        A distinct signal from certinext.dcv.expiring: this tracks the
+        issued certificate's own expiry per the CA's order record,
+        independent of DCV verification state — a cert can be expiring
+        here while DCV is still fine, e.g. if renewal broke somewhere
+        downstream of DCV.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 2af361373bd34a069726232036a19224
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.expiring[prod])>0'
+        name: 'CertiNext prod: issued certificate(s) expiring soon'
+        opdata: 'expiring: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          At least one issued certificate expires within
+          --order-cert-expiry-days. Check the account in CertiNext for
+          which order, and whether a renewal is already in flight.
+        tags:
+        - tag: env
+          value: prod
     - uuid: 025434e05c904e598dae9654d37c3675
       name: 'CertiNext prod: Days since last certificate issued'
       type: TRAP
@@ -571,6 +602,31 @@ zabbix_export:
         description: |
           Sandbox order(s) rejected, cancelled, expired, or revoked within
           the lookback window. Often a deliberate test state.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: 7a20c6f0658b44258cec319b3f1212a1
+      name: 'CertiNext sandbox: Issued certificates expiring soon'
+      type: TRAP
+      key: 'certinext.orders.expiring[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox issued orders whose certificate_expiry_date falls within
+        the pusher's --order-cert-expiry-days (including already-expired).
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: bbbc4ec769b5474687476c9d99b37af7
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.expiring[sandbox])>0'
+        name: 'CertiNext sandbox: issued certificate(s) expiring soon'
+        opdata: 'expiring: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          Sandbox issued certificate(s) expiring within
+          --order-cert-expiry-days. Often a deliberate test state.
         tags:
         - tag: env
           value: sandbox

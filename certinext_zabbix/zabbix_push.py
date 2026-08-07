@@ -19,8 +19,10 @@ Three metric families, matching the three designed checks:
   minimum days left. Pushed only when the caller opts in (daily run).
 - **Order-health metrics** (several Orders Report list calls): orders stuck
   in a pending certificate status, orders that recently failed (rejected/
-  cancelled/expired/revoked), and days since the last certificate was
-  issued. Pushed only when the caller opts in (daily run) — see
+  cancelled/expired/revoked), days since the last certificate was issued,
+  and issued certificates expiring within a lead time (from the same
+  ``issued`` list already fetched for the days-since-issued metric — no
+  extra API calls). Pushed only when the caller opts in (daily run) — see
   :func:`collect_order_metrics` for why the thresholds are deliberately
   conservative given the vendor's free-text status fields.
 """
@@ -49,6 +51,7 @@ KEY_MIN_DAYS_LEFT = "certinext.dcv.min_days_left"
 KEY_ORDERS_PENDING = "certinext.orders.pending"
 KEY_ORDERS_FAILED_RECENT = "certinext.orders.failed_recent"
 KEY_ORDERS_DAYS_SINCE_ISSUED = "certinext.orders.days_since_issued"
+KEY_ORDERS_EXPIRING = "certinext.orders.expiring"
 
 ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
@@ -302,6 +305,7 @@ def collect_order_metrics(
     env: str,
     *,
     failing_lookback_days: int,
+    cert_expiry_days: int,
     now: datetime | None = None,
 ) -> dict[str, int | float]:
     """Compute the order-health metrics from pre-fetched order buckets.
@@ -322,6 +326,13 @@ def collect_order_metrics(
     terminal vendor-side event timestamped by ``order_date``, not something
     that stays continuously true in Zabbix's own item history.
 
+    The expiring-soon count reuses *issued* (already fetched for
+    :data:`KEY_ORDERS_DAYS_SINCE_ISSUED`) and its
+    ``certificate_expiry_date`` field — a distinct signal from
+    ``certinext.dcv.expiring`` (:func:`collect_expiry_metrics`): that metric
+    tracks DCV *verification* expiry, this tracks the issued *certificate's*
+    expiry per the CA's own order record, independent of DCV state.
+
     Args:
         pending: Orders returned by querying each of
             :data:`PENDING_CERTIFICATE_STATUSES`.
@@ -335,18 +346,24 @@ def collect_order_metrics(
             :data:`KEY_ORDERS_FAILED_RECENT` — older rejections/
             cancellations are normal history, not something to alert on
             forever.
+        cert_expiry_days: An *issued* order counts toward
+            :data:`KEY_ORDERS_EXPIRING` when its ``certificate_expiry_date``
+            falls within this many days of *now* (already-expired
+            included) — the same lead-time semantics as
+            :func:`collect_expiry_metrics`'s ``expiry_days``.
         now: Reference time for the day math (timezone-aware). Defaults to
             the current UTC time; injectable for tests.
 
     Returns:
-        Mapping with :data:`KEY_ORDERS_PENDING` and
-        :data:`KEY_ORDERS_FAILED_RECENT` (always present) and, when at
+        Mapping with :data:`KEY_ORDERS_PENDING`, :data:`KEY_ORDERS_FAILED_RECENT`,
+        and :data:`KEY_ORDERS_EXPIRING` (always present) and, when at
         least one issued order carries an ``order_date``,
         :data:`KEY_ORDERS_DAYS_SINCE_ISSUED` (float days), all
         environment-keyed.
     """
     now = now or datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=failing_lookback_days)
+    failing_cutoff = now - timedelta(days=failing_lookback_days)
+    expiry_cutoff = now + timedelta(days=cert_expiry_days)
     metrics: dict[str, int | float] = {
         # order_status != "Order Fulfilled" is a defensive re-check, not
         # the primary filter — the pending-status query should already
@@ -356,7 +373,11 @@ def collect_order_metrics(
             1 for o in pending if o.order_status != "Order Fulfilled"
         ),
         item_key(KEY_ORDERS_FAILED_RECENT, env): sum(
-            1 for o in failed if o.order_date is not None and o.order_date >= cutoff
+            1 for o in failed if o.order_date is not None and o.order_date >= failing_cutoff
+        ),
+        item_key(KEY_ORDERS_EXPIRING, env): sum(
+            1 for o in issued
+            if o.certificate_expiry_date is not None and o.certificate_expiry_date <= expiry_cutoff
         ),
     }
     issued_dates = [o.order_date for o in issued if o.order_date is not None]

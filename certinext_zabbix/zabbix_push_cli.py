@@ -75,6 +75,7 @@ from .zabbix_push import (
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
     KEY_ORDERS_DAYS_SINCE_ISSUED,
+    KEY_ORDERS_EXPIRING,
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_PENDING,
     KEY_UNVERIFIED,
@@ -142,8 +143,9 @@ def run(
         help=(
             "Also push order-health metrics: orders stuck in a pending "
             "certificate status, orders that recently failed (rejected/"
-            "cancelled/expired/revoked), and days since the last certificate "
-            "was issued. Fetches the orders report across several status "
+            "cancelled/expired/revoked), days since the last certificate "
+            "was issued, and issued certificates expiring within a lead "
+            "time. Fetches the orders report across several status "
             "filters — schedule on a daily run, not every 15 minutes. "
             "Disabled by default."
         ),
@@ -155,6 +157,17 @@ def run(
             "Only count rejected/cancelled/expired/revoked orders from the "
             "last DAYS days toward the failed-recent metric — older "
             "history is normal, not something to alert on forever."
+        ),
+    )] = 30,
+    order_cert_expiry_days: Annotated[int, typer.Option(
+        "--order-cert-expiry-days", metavar="DAYS",
+        envvar="CERTINEXT_ORDER_CERT_EXPIRY_DAYS",
+        help=(
+            "An issued order's certificate counts toward the expiring-soon "
+            "metric when its certificate_expiry_date falls within DAYS "
+            "days (already-expired included) — same lead-time semantics "
+            "as --expiry-days, but for the certificate itself rather than "
+            "DCV verification."
         ),
     )] = 30,
     # Zabbix destination
@@ -186,8 +199,9 @@ def run(
     DCV-expiry metrics (expiring count, minimum days left); with
     --order-health also fetches the orders report and pushes the
     order-health metrics (pending count, failed-recent count, days since
-    last issued). The matching trapper items live on `CertiNext DCV by
-    Zabbix trapper` in Zabbix.
+    last issued, and issued certificates expiring within
+    --order-cert-expiry-days). The matching trapper items live on
+    `CertiNext DCV by Zabbix trapper` in Zabbix.
     """
     correlation_id = str(uuid.uuid4())
     interrupted = False
@@ -257,6 +271,7 @@ def run(
                 log.info(
                     "Order-health check enabled",
                     failing_lookback_days=order_failing_lookback_days,
+                    cert_expiry_days=order_cert_expiry_days,
                 )
 
         sess = build_session(
@@ -341,11 +356,13 @@ def run(
                 metrics.update(collect_order_metrics(
                     pending_orders, failed_orders, issued_orders, env,
                     failing_lookback_days=order_failing_lookback_days,
+                    cert_expiry_days=order_cert_expiry_days,
                 ))
                 log.info(
                     "Collected order-health metrics",
                     pending=metrics[item_key(KEY_ORDERS_PENDING, env)],
                     failed_recent=metrics[item_key(KEY_ORDERS_FAILED_RECENT, env)],
+                    expiring=metrics[item_key(KEY_ORDERS_EXPIRING, env)],
                     days_since_issued=metrics.get(item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, env)),
                 )
 

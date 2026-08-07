@@ -22,6 +22,7 @@ from certinext_zabbix.zabbix_push import (
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
     KEY_ORDERS_DAYS_SINCE_ISSUED,
+    KEY_ORDERS_EXPIRING,
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_PENDING,
     KEY_TOTAL,
@@ -154,12 +155,15 @@ class TestCollectExpiryMetrics:
 def _order(
     order_status: str = "Order Accepted",
     order_date: str | None = None,
+    certificate_expiry_date: str | None = None,
 ) -> OrderRecord:
     """Build an OrderRecord from wire-format fields for order-health tests.
 
     Args:
         order_status: Value for the ``orderStatus`` wire field.
         order_date: ISO timestamp for ``orderDate``, or None to omit it.
+        certificate_expiry_date: ISO timestamp for ``certificateExpiryDate``,
+            or None to omit it.
 
     Returns:
         A validated OrderRecord (no API client attached — field access only).
@@ -167,6 +171,8 @@ def _order(
     payload: dict[str, Any] = {"orderStatus": order_status}
     if order_date is not None:
         payload["orderDate"] = order_date
+    if certificate_expiry_date is not None:
+        payload["certificateExpiryDate"] = certificate_expiry_date
     return OrderRecord.model_validate(payload)
 
 
@@ -207,7 +213,9 @@ class TestCollectOrderMetrics:
 
     def test_pending_excludes_fulfilled_defensively(self) -> None:
         pending = [_order("Order Accepted"), _order("Order Fulfilled")]
-        metrics = collect_order_metrics(pending, [], [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            pending, [], [], ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert metrics[item_key(KEY_ORDERS_PENDING, ENV_PROD)] == 1
 
     def test_failed_recent_excludes_orders_outside_lookback(self) -> None:
@@ -215,12 +223,16 @@ class TestCollectOrderMetrics:
             _order(order_date="2026-07-01T00:00:00"),   # 12d old — within 30d lookback
             _order(order_date="2025-01-01T00:00:00"),    # ancient — outside lookback
         ]
-        metrics = collect_order_metrics([], failed, [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], failed, [], ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
 
     def test_failed_recent_boundary_day_counts(self) -> None:
         failed = [_order(order_date="2026-06-13T12:00:00")]  # exactly 30d before _NOW
-        metrics = collect_order_metrics([], failed, [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], failed, [], ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
 
     def test_days_since_issued_uses_max_order_date(self) -> None:
@@ -228,29 +240,59 @@ class TestCollectOrderMetrics:
             _order(order_date="2026-07-10T12:00:00"),  # 3d ago
             _order(order_date="2026-07-01T12:00:00"),  # 12d ago — not the max
         ]
-        metrics = collect_order_metrics([], [], issued, ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], [], issued, ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
 
     def test_no_issued_orders_omits_days_since_issued(self) -> None:
-        metrics = collect_order_metrics([], [], [], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], [], [], ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
 
     def test_issued_order_with_no_order_date_is_excluded(self) -> None:
-        metrics = collect_order_metrics([], [], [_order()], ENV_PROD, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], [], [_order()], ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
 
     def test_sandbox_env_reaches_keys(self) -> None:
-        metrics = collect_order_metrics([], [], [], ENV_SANDBOX, failing_lookback_days=30, now=_NOW)
+        metrics = collect_order_metrics(
+            [], [], [], ENV_SANDBOX, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
         assert metrics == {
             item_key(KEY_ORDERS_PENDING, ENV_SANDBOX): 0,
             item_key(KEY_ORDERS_FAILED_RECENT, ENV_SANDBOX): 0,
+            item_key(KEY_ORDERS_EXPIRING, ENV_SANDBOX): 0,
         }
 
     def test_defaults_now_to_current_time(self) -> None:
         recent = datetime.now(timezone.utc) - timedelta(days=1)
         issued = [_order(order_date=recent.isoformat())]
-        metrics = collect_order_metrics([], [], issued, ENV_PROD, failing_lookback_days=30)
+        metrics = collect_order_metrics(
+            [], [], issued, ENV_PROD, failing_lookback_days=30, cert_expiry_days=30,
+        )
         assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == pytest.approx(1.0, abs=0.01)
+
+    def test_expiring_counts_issued_certs_within_lead_time(self) -> None:
+        issued = [
+            _order(certificate_expiry_date="2026-07-20T12:00:00"),  # +7d → expiring
+            _order(certificate_expiry_date="2026-09-01T12:00:00"),  # +50d → fine
+            _order(certificate_expiry_date="2026-07-10T12:00:00"),  # -3d → expiring (lapsed)
+            _order(),                                                # no expiry date → excluded
+        ]
+        metrics = collect_order_metrics(
+            [], [], issued, ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 2
+
+    def test_expiring_boundary_day_counts(self) -> None:
+        issued = [_order(certificate_expiry_date="2026-07-27T12:00:00")]  # exactly +14d
+        metrics = collect_order_metrics(
+            [], [], issued, ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 1
 
 
 class TestPushMetrics:
