@@ -1,6 +1,6 @@
 ---
 status: in-progress
-implements-adr: [0008, 0009]
+implements-adr: [0008, 0009, 0010]
 ---
 
 # Order-health follow-ups
@@ -182,7 +182,36 @@ without a certificate expiry date. Then a prod `--dry-run --order-health` and co
 
 </details>
 
-## Step 3 — Decide the `failed_recent` trigger shape (OPEN — not decided)
+## Step 3 — Decide the `failed_recent` trigger shape — DECIDED 2026-08-17
+
+**Settled as [ADR 0010](../adr/0010-cancelled-orders-are-not-failures.md) and
+implemented.** The suspicion recorded below was correct, and measuring it made the fix
+obvious.
+
+Prod measurement (read-only, whole order history): **all 9 rows in the `failed` bucket
+are `Order Cancelled`** — rejected/expired/revoked orders have *never* occurred. Replaying
+the rolling 30-day window over the 60 days where it sits fully inside available history,
+the trigger would have been in PROBLEM **50 of 60 days (83%)** as one continuous 50-day
+episode, reading 0 today only because the last cancellation was 39 days ago.
+
+So the fix is a classification change, not a threshold change — the same conclusion
+ADR 0008 reached, by the same route. `Order Cancelled` becomes a recognized
+terminal-but-routine status in its own `OrderBuckets.cancelled` field, which feeds no
+metric and is logged per run. `failed_recent` then counts only terminal statuses the
+pusher does not recognize, so `>0` means "something genuinely new happened" — zero
+occurrences across the account's life.
+
+**The trigger, its `>0` comparison, and the 30-day lookback are all unchanged**; only
+the item and trigger descriptions needed correcting. A data-only `cancelled_recent`
+metric was offered and declined — two more template items for something nobody has
+asked to see — but bucketing cancellations separately keeps that upgrade path open.
+
+Verified against prod after the change: `Cancelled orders excluded from the failed
+bucket count=9`, no unrecognized-status log line at all, `failed_recent=0`. 91 tests
+pass.
+
+<details>
+<summary>Original instructions (kept for the record)</summary>
 
 `certinext.orders.failed_recent` carries `last(...)>0` WARNING. This was **not**
 settled on 2026-08-07 and needs a decision before order-health notifications are
@@ -202,6 +231,8 @@ It interacts with two other things, so decide it with them in view:
 
 Whatever is decided, record it: an ADR if a shape is chosen, a wishlist idea if it is
 deferred again.
+
+</details>
 
 ## Step 4 — Verify the sandbox action condition (implements ADR 0009)
 
@@ -227,8 +258,9 @@ except a sandbox problem paging someone.
 
 ## Outstanding as of 2026-08-17
 
-Steps 1 and 2 are implemented, unit-tested, and step 2 is confirmed against live
-production. What remains needs either a human in the Zabbix UI or a decision:
+Steps 1, 2 and 3 are implemented, unit-tested, and confirmed against live production.
+**Everything remaining needs a human in the Zabbix UI** — no code or docs work is left
+in this plan.
 
 Issue links below point at `gitlab.its.maine.edu`, the University of Maine System's
 **internal** GitLab instance — not reachable from the public internet, and not the
@@ -236,9 +268,12 @@ GitHub mirror you may be reading this on.
 
 | # | Item | Blocked on | Issue |
 |---|---|---|---|
-| 1 | Re-import the template and confirm no `orders.expiring` trigger appears | Zabbix UI | [internal #4](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/4) |
-| 2 | `failed_recent` trigger shape | A decision — see step 3 | [internal #6](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/6) |
-| 3 | Sandbox action condition suppresses notification but not the problem view | Zabbix UI | — |
+| 1 | Re-import the template; confirm it parses, that no `orders.expiring` trigger appears, and that the corrected `failed_recent` descriptions land | Zabbix UI | [internal #4](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/4) |
+| 2 | Sandbox action condition suppresses notification but not the problem view (step 4) | Zabbix UI | — |
+
+Still gated on things outside this plan: order-health **notifications** should not be
+enabled until the prod abandoned-order backlog is cleared (see below), and
+`orders.expiring` gets no trigger until IDEA-005 lands.
 
 Running a live `--dry-run` needs the `keyring` package, which is not a dependency of
 this repo — see the "Live verification runs" section of

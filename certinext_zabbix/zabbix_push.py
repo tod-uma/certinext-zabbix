@@ -77,6 +77,12 @@ ORDER_STATUS_FULFILLED = "Order Fulfilled"
 ORDER_STATUS_ACCEPTED = "Order Accepted"
 ORDER_STATUS_IN_PROGRESS = "Order In-Progress"
 
+# Terminal, but routine administrative work rather than a failure — see
+# docs/adr/0010-cancelled-orders-are-not-failures.md. Cancelling an order is
+# something an operator does on purpose, so it must not reach
+# certinext.orders.failed_recent.
+ORDER_STATUS_CANCELLED = "Order Cancelled"
+
 # Statuses meaning "the order is still moving" — not terminal either way.
 # Both are split again on certificate presence by :func:`bucket_orders`.
 #
@@ -267,7 +273,7 @@ def collect_expiry_metrics(
 
 
 class OrderBuckets(NamedTuple):
-    """The orders report split into the four buckets the metrics need.
+    """The orders report split into the buckets the metrics need.
 
     Produced by :func:`bucket_orders` and consumed by
     :func:`collect_order_metrics`. The names deliberately avoid the word
@@ -275,12 +281,19 @@ class OrderBuckets(NamedTuple):
     whole pre-fulfillment space, which spans both :attr:`unissued` and
     :attr:`undownloaded`, so reusing it for either half alone would
     mislead anyone cross-referencing the API docs.
+
+    :attr:`cancelled` is tracked separately from :attr:`failed` and feeds
+    no metric today — it exists so deliberately-cancelled orders stay
+    countable in the run log instead of vanishing, and so a data-only
+    metric can be added later without re-plumbing the bucketing. See
+    ``docs/adr/0010-cancelled-orders-are-not-failures.md``.
     """
 
     unissued: list[OrderRecord]
     undownloaded: list[OrderRecord]
     failed: list[OrderRecord]
     issued: list[OrderRecord]
+    cancelled: list[OrderRecord]
 
 
 def fetch_orders(
@@ -336,18 +349,25 @@ def fetch_orders(
 
 
 def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
-    """Split *records* four ways on ``order_status`` and cert presence.
+    """Split *records* on ``order_status`` and certificate presence.
 
-    Only :data:`ORDER_STATUS_FULFILLED` and the
-    :data:`ORDER_STATUSES_IN_FLIGHT` members are classified positively;
+    :data:`ORDER_STATUS_FULFILLED`, the :data:`ORDER_STATUSES_IN_FLIGHT`
+    members and :data:`ORDER_STATUS_CANCELLED` are classified positively;
     every other non-empty ``order_status`` falls into
-    :attr:`~OrderBuckets.failed`. That catch-all is deliberate — a live
-    100-row prod sample carried only ``"Order Cancelled"`` as a third
-    value, but the vendor's rejected/expired/revoked orders have never been
-    observed and their ``order_status`` strings are undocumented. Treating
-    an unknown terminal status as a failure surfaces it on the
-    failed-recent metric rather than silently dropping it from every
-    bucket. Unrecognized values are logged once per run so drift is visible.
+    :attr:`~OrderBuckets.failed`. That catch-all is deliberate — the
+    vendor's rejected/expired/revoked orders have never been observed and
+    their ``order_status`` strings are undocumented. Treating an unknown
+    terminal status as a failure surfaces it on the failed-recent metric
+    rather than silently dropping it from every bucket. Unrecognized
+    values are logged once per run so drift is visible.
+
+    Cancellations are terminal but **not** failures: cancelling an order
+    is routine administrative work, and every ``failed`` row observed in
+    production has been a cancellation, so alerting on them would have put
+    the failed-recent trigger in PROBLEM 83% of the measured period while
+    signalling nothing. They go to :attr:`~OrderBuckets.cancelled`, which
+    feeds no metric. See
+    ``docs/adr/0010-cancelled-orders-are-not-failures.md``.
 
     An in-flight order is split again on whether a certificate exists for
     it, because the two halves need different remediation: an order the CA
@@ -375,7 +395,9 @@ def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
         An :class:`OrderBuckets` quadruple. Order within each bucket
         follows *records*.
     """
-    buckets = OrderBuckets(unissued=[], undownloaded=[], failed=[], issued=[])
+    buckets = OrderBuckets(
+        unissued=[], undownloaded=[], failed=[], issued=[], cancelled=[],
+    )
     unrecognized: set[str] = set()
     missing_status = 0
     for record in records:
@@ -387,11 +409,18 @@ def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
                 buckets.undownloaded.append(record)
             else:
                 buckets.unissued.append(record)
+        elif status == ORDER_STATUS_CANCELLED:
+            buckets.cancelled.append(record)
         elif status:
             unrecognized.add(status)
             buckets.failed.append(record)
         else:
             missing_status += 1
+    if buckets.cancelled:
+        log.info(
+            "Cancelled orders excluded from the failed bucket",
+            count=len(buckets.cancelled),
+        )
     if unrecognized:
         log.info(
             "Bucketed orders with unrecognized order_status as failed",
@@ -427,9 +456,11 @@ def collect_order_metrics(
     via ``min()`` window triggers, the same pattern already used for
     ``certinext.domains.unverified``. The failed-recent count *is*
     date-filtered here, because it has no equivalent Zabbix-side history to
-    filter on — a rejected/cancelled/expired/revoked order is a terminal
-    vendor-side event timestamped by ``order_date``, not something that
-    stays continuously true in Zabbix's own item history.
+    filter on — a rejected/expired/revoked order is a terminal vendor-side
+    event timestamped by ``order_date``, not something that stays
+    continuously true in Zabbix's own item history. Cancellations are
+    excluded from the bucket entirely (see :func:`bucket_orders`), so they
+    never reach this count.
 
     The expiring-soon count spans both cert-bearing buckets (*issued* and
     *undownloaded*) — a generated certificate expires on the CA's schedule
@@ -446,9 +477,8 @@ def collect_order_metrics(
             :data:`ENV_SANDBOX`) — see :func:`item_key`.
         failing_lookback_days: Only failed orders whose ``order_date``
             falls within this many days of *now* count toward
-            :data:`KEY_ORDERS_FAILED_RECENT` — older rejections/
-            cancellations are normal history, not something to alert on
-            forever.
+            :data:`KEY_ORDERS_FAILED_RECENT` — an older failure is normal
+            history, not something to alert on forever.
         cert_expiry_days: A cert-bearing order counts toward
             :data:`KEY_ORDERS_EXPIRING` when its ``certificate_expiry_date``
             falls within this many days of *now* (already-expired

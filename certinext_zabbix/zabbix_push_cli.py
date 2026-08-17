@@ -342,7 +342,9 @@ def run(
         if order_health:
             log.info("Fetching orders report for order-health check")
             order_fetch_failed = False
-            buckets = OrderBuckets(unissued=[], undownloaded=[], failed=[], issued=[])
+            buckets = OrderBuckets(
+                unissued=[], undownloaded=[], failed=[], issued=[], cancelled=[],
+            )
             try:
                 # One unfiltered fetch, bucketed client-side. The vendor's
                 # server-side status filter can't be used: 5 of its 6

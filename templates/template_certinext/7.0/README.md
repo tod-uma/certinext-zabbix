@@ -71,7 +71,7 @@ Each exists twice — `[prod]` and `[sandbox]` — via the Zabbix key parameter.
 | `certinext.dcv.min_days_left[<env>]` | Float (days) | Days until the soonest DCV expiry across all verified domains in scope; negative once lapsed. |
 | `certinext.orders.unissued[<env>]` | Unsigned | Orders the CA has accepted but not yet generated a certificate for — still working through approval, DCV, CSR, documents, or the agreement. |
 | `certinext.orders.undownloaded[<env>]` | Unsigned | Orders whose certificate was generated but never downloaded — a delivery/automation failure rather than an issuance one. |
-| `certinext.orders.failed_recent[<env>]` | Unsigned | Orders in a terminal non-fulfilled state (cancelled, and by the catch-all rule any unrecognized `order_status`) dated within the pusher's `--order-failing-lookback-days` window (default 30 days). |
+| `certinext.orders.failed_recent[<env>]` | Unsigned | Orders in a terminal non-fulfilled state dated within the pusher's `--order-failing-lookback-days` window (default 30 days). **Cancellations are excluded** — they are routine admin work, so in practice this counts terminal statuses the pusher does not recognize at all. See [ADR 0010](../../../docs/adr/0010-cancelled-orders-are-not-failures.md). |
 | `certinext.orders.expiring[<env>]` | Unsigned | Issued orders whose `certificate_expiry_date` falls within the pusher's `--order-cert-expiry-days` (default 30), already-expired included. Distinct from `certinext.dcv.expiring`: this is the certificate's own expiry per the CA's order record, independent of DCV state. **Deliberately has no trigger** — see [Triggers](#triggers). |
 | `certinext.orders.days_since_issued[<env>]` | Float (days) | Days since the CA most recently generated a certificate, by `order_date` — spans both downloaded and undownloaded certs. No trigger yet — see [Triggers](#triggers). |
 
@@ -121,7 +121,7 @@ ships — expected, not a monitoring fault.
 | DCV expires within `{$CERTINEXT.DCV.WARN_DAYS}` days | WARNING | `min_days_left` ≤ `{$CERTINEXT.DCV.WARN_DAYS}`; dependency-chained under AVERAGE. |
 | order(s) stuck awaiting issuance | AVERAGE | `unissued` > 0 for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`. |
 | certificate(s) generated but never downloaded | WARNING | `undownloaded` > 0 for the whole of `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}`. |
-| recent order failure(s) | WARNING | `failed_recent` > 0 (already date-filtered by the pusher, so no Zabbix-side window needed). |
+| recent order failure(s) | WARNING | `failed_recent` > 0 (already date-filtered by the pusher, so no Zabbix-side window needed). Cancellations do not count toward it — see [ADR 0010](../../../docs/adr/0010-cancelled-orders-are-not-failures.md) — so this fires only on a terminal status the pusher has never seen. |
 | no data from pusher (daily order-health run) | WARNING | `nodata()` on `unissued` for `{$CERTINEXT.NODATA.DAILY}` — prod only; ships DISABLED for sandbox until a sandbox daily schedule exists. |
 
 > **Before enabling notifications:** both order-stuck triggers compare

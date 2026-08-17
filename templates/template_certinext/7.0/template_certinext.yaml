@@ -348,10 +348,18 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Orders rejected, cancelled, expired, or revoked within the
-        pusher's --order-failing-lookback-days window (default 30 days).
-        Older failures are normal account history and are excluded —
-        this is meant to flag a *recent* failure, not accumulate forever.
+        Orders in a terminal non-fulfilled state within the pusher's
+        --order-failing-lookback-days window (default 30 days). Older
+        failures are normal account history and are excluded — this is
+        meant to flag a *recent* failure, not accumulate forever.
+
+        CANCELLED ORDERS ARE DELIBERATELY EXCLUDED. Cancelling an order is
+        routine administrative work; every order that has ever landed in
+        this bucket in production was a cancellation, which would have held
+        the trigger below in PROBLEM 83% of the measured period while
+        signalling nothing. So in practice this counts terminal statuses
+        the pusher does not recognize at all — see
+        docs/adr/0010-cancelled-orders-are-not-failures.md.
       tags:
       - tag: env
         value: prod
@@ -362,9 +370,13 @@ zabbix_export:
         opdata: 'failed recently: {ITEM.LASTVALUE1}'
         priority: WARNING
         description: |
-          At least one order was rejected, cancelled, expired, or revoked
-          within the lookback window. Check the account in CertiNext for
-          which order and why.
+          An order reached a terminal state the pusher does not recognize
+          (not fulfilled, not in flight, not a cancellation) within the
+          lookback window. Rejected/expired/revoked orders have never been
+          observed in this account, so this firing means something genuinely
+          new happened. Check the account in CertiNext for which order and
+          why, and consider whether the new status needs classifying in
+          bucket_orders().
         tags:
         - tag: env
           value: prod
@@ -669,8 +681,10 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Sandbox orders rejected, cancelled, expired, or revoked within
-        the pusher's --order-failing-lookback-days window.
+        Sandbox orders in a terminal non-fulfilled state within the
+        pusher's --order-failing-lookback-days window. Cancellations are
+        deliberately excluded, as in prod — see
+        docs/adr/0010-cancelled-orders-are-not-failures.md.
       tags:
       - tag: env
         value: sandbox
@@ -681,8 +695,9 @@ zabbix_export:
         opdata: 'failed recently: {ITEM.LASTVALUE1}'
         priority: WARNING
         description: |
-          Sandbox order(s) rejected, cancelled, expired, or revoked within
-          the lookback window. Often a deliberate test state.
+          A sandbox order reached a terminal state the pusher does not
+          recognize (not fulfilled, not in flight, not a cancellation)
+          within the lookback window. Often a deliberate test state.
         tags:
         - tag: env
           value: sandbox

@@ -228,16 +228,18 @@ class TestFetchOrders:
 class TestBucketOrders:
     """Client-side bucketing on order_status, with an unknown-is-failed rule."""
 
-    def test_splits_the_four_buckets(self) -> None:
+    def test_splits_every_bucket(self) -> None:
         buckets = bucket_orders([
             _order("Order Fulfilled", certificate_expiry_date="2027-01-01T00:00:00"),
             _order("Order Accepted"),
             _order("Order Accepted", certificate_expiry_date="2027-01-01T00:00:00"),
             _order("Order Cancelled"),
+            _order("Order Something Unknown"),
         ])
         assert len(buckets.issued) == 1
         assert len(buckets.unissued) == 1
         assert len(buckets.undownloaded) == 1
+        assert len(buckets.cancelled) == 1
         assert len(buckets.failed) == 1
 
     def test_accepted_split_keys_on_expiry_date_not_display_string(self) -> None:
@@ -273,6 +275,29 @@ class TestBucketOrders:
         assert not buckets.failed
         assert not buckets.issued
 
+    def test_cancelled_is_not_a_failure(self) -> None:
+        """Cancelling an order is routine admin work, not an incident.
+
+        Every row ever observed in the failed bucket in production was a
+        cancellation, so counting them would have held the failed-recent
+        trigger in PROBLEM 83% of the measured period while signalling
+        nothing. See docs/adr/0010-cancelled-orders-are-not-failures.md.
+        """
+        cancelled = _order("Order Cancelled", order_date="2026-08-16T00:00:00")
+        buckets = bucket_orders([cancelled])
+        assert buckets.cancelled == [cancelled]
+        assert not buckets.failed
+
+    def test_cancelled_excluded_from_failed_recent_metric(self) -> None:
+        # End-to-end guard: a fresh cancellation must not raise the metric
+        # the WARNING trigger reads, however recent it is.
+        now = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        buckets = bucket_orders([_order("Order Cancelled", order_date="2026-08-16T00:00:00")])
+        metrics = collect_order_metrics(
+            buckets, ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=now,
+        )
+        assert metrics["certinext.orders.failed_recent[prod]"] == 0
+
     def test_unrecognized_status_counts_as_failed(self) -> None:
         # Rejected/expired/revoked orders have never been observed live, so
         # their order_status strings are unknown. An unknown terminal status
@@ -288,7 +313,7 @@ class TestBucketOrders:
 
     def test_empty_input(self) -> None:
         assert bucket_orders([]) == OrderBuckets(
-            unissued=[], undownloaded=[], failed=[], issued=[],
+            unissued=[], undownloaded=[], failed=[], issued=[], cancelled=[],
         )
 
 
@@ -297,6 +322,7 @@ def _buckets(
     undownloaded: list[OrderRecord] | None = None,
     failed: list[OrderRecord] | None = None,
     issued: list[OrderRecord] | None = None,
+    cancelled: list[OrderRecord] | None = None,
 ) -> OrderBuckets:
     """Build an OrderBuckets with only the buckets a test cares about.
 
@@ -305,13 +331,14 @@ def _buckets(
         undownloaded: Orders whose certificate exists but was never fetched.
         failed: Orders in a terminal non-fulfilled state.
         issued: Orders fulfilled (certificate generated and downloaded).
+        cancelled: Orders deliberately cancelled — terminal but routine.
 
     Returns:
         An OrderBuckets with unsupplied buckets empty.
     """
     return OrderBuckets(
         unissued=unissued or [], undownloaded=undownloaded or [],
-        failed=failed or [], issued=issued or [],
+        failed=failed or [], issued=issued or [], cancelled=cancelled or [],
     )
 
 
