@@ -1,5 +1,5 @@
 ---
-status: planned
+status: in-progress
 implements-adr: [0008, 0009]
 ---
 
@@ -45,9 +45,10 @@ sandbox being a CI/CD playground, and that prod certificates were not short-live
 Both assumptions were wrong. Prod has the same structure, which is what turned
 "tune the threshold" into "no threshold can work here."
 
-`lv-o-swdist02.its.maine.edu` is the clinching case: it carries two orders, the newer
-placed 2026-08-05. The metric counted that **renewal two days after it succeeded**,
-because a 30-day certificate is inside a 30-day window from the moment it is issued.
+One internal software-distribution host is the clinching case: it carries two orders,
+the newer placed 2026-08-05. The metric counted that **renewal two days after it
+succeeded**, because a 30-day certificate is inside a 30-day window from the moment it
+is issued.
 </details>
 
 ## Prerequisite: cut stable releases first
@@ -61,7 +62,30 @@ tag; the `first-stable-release` skill covers that case.
 Do this **before** step 1 below. Any `pyproject.toml` version bump needs `uv lock` in
 the same commit, or `--locked` CI jobs go red immediately.
 
-## Step 1 — Remove the `orders.expiring` triggers (implements ADR 0008)
+## Step 1 — Remove the `orders.expiring` triggers (implements ADR 0008) — DONE 2026-08-17
+
+**Done.** Both triggers removed; the template now parses to **18 items / 24 triggers**
+with no `orders.expiring` trigger and no duplicate UUIDs (checked by loading the YAML
+and walking `templates[0].items[*].triggers`). Both `orders.expiring` item
+descriptions now carry a `DELIBERATELY HAS NO TRIGGER — do not add one` paragraph with
+the bimodal-lifetime reason and a pointer to ADR 0008 and IDEA-005.
+
+Doc counts updated: `docs/deployment.md` twenty-six → twenty-four (plus a note naming
+both trigger-less items), and IDEA-005's cons section 26 → 24. No test asserted a
+trigger or item count — grepped, there were none.
+
+Also fixed two pre-existing drifts found in
+`templates/template_certinext/7.0/README.md` while updating it: the trigger count read
+`22 total (11 per environment)` (never updated when order-health triggers landed), and
+the `recent order failure(s)` row had been stranded *below* a blockquote, outside the
+table, so it rendered as literal pipe text. The metrics table was also missing
+`certinext.orders.expiring` entirely.
+
+**Not yet verified:** re-importing the template into Zabbix. Requires the Zabbix UI —
+see the outstanding-work note at the end of this document.
+
+<details>
+<summary>Original instructions (kept for the record)</summary>
 
 Delete both `certinext.orders.expiring` triggers — `[prod]` and `[sandbox]` — from
 `templates/template_certinext/7.0/template_certinext.yaml`. The **items stay**; only
@@ -82,7 +106,58 @@ item counts — `KEY_* constants ↔ template sync is manual, with no automated 
 silent failure at push time`, so counts asserted in prose or tests must be updated by
 hand.
 
-## Step 2 — Fix `Order In-Progress` misbucketing (bug)
+</details>
+
+## Step 2 — Fix `Order In-Progress` misbucketing (bug) — DONE 2026-08-17
+
+**Done.** `ORDER_STATUS_IN_PROGRESS = "Order In-Progress"` added, and the accepted
+branch generalized to a frozenset `ORDER_STATUSES_IN_FLIGHT` holding it plus
+`ORDER_STATUS_ACCEPTED`. Both now take the same certificate-presence split into
+`undownloaded` / `unissued`. The `elif status:` catch-all is untouched, as the plan
+required. Docstrings and the constants comment updated to say why, citing issue #5.
+
+Test added: `TestBucketOrders::test_in_progress_is_in_flight_not_failed`, covering an
+`Order In-Progress` record both with and without a certificate expiry date, and
+asserting it lands in neither `failed` nor `issued`. Suite: **89 passed**, `ruff check`
+and `mypy` clean.
+
+`collect_order_metrics()` needed no change — it derives every metric from the buckets
+and never re-inspects a status field, so the fix propagates to `failed_recent` and
+`unissued` automatically.
+
+**Verified against live prod 2026-08-17** (read-only `--dry-run`, nothing sent).
+A single `Order In-Progress` row still exists — no certificate generated, roughly
+83 days old — and bucketing the same fetched record set both ways gives:
+
+| | pre-fix | post-fix | delta |
+|---|---|---|---|
+| `unissued` | 23 | 24 | **+1** |
+| `undownloaded` | 20 | 20 | +0 |
+| `failed` (all) | 10 | 9 | **−1** |
+| `failed_recent` (30d) | 0 | 0 | +0 |
+
+Exactly one row moves from `failed` to `unissued`, which is the whole intent.
+
+**Correction to this step's original verification criteria:** it predicted
+`failed_recent` would "drop to 0". It is 0 both before *and* after the fix, so that is
+not evidence of anything. `failed_recent` was 1 on 2026-08-07 and is 0 now because a
+cancelled order aged out of the rolling 30-day window — the `Order In-Progress` row
+never contributed to it, being 83 days old. Likewise the predicted "`unissued` rises by
+1 (24 → 25)" compared against a 10-day-old figure; against *today's* data the rise is
+23 → 24. The `+1` is real, the absolute numbers moved. Full prod snapshot today:
+
+```text
+unissued=24 undownloaded=20 failed_recent=0 expiring=90 days_since_issued=0.37
+```
+
+Note `expiring` is now **90**, up from 68 on 2026-08-07 — it keeps climbing, which is
+consistent with ADR 0008's finding that the metric cannot be thresholded.
+
+Sandbox was run too and is clean, but carries no `Order In-Progress` row (only
+`Order Cancelled` hits the catch-all), so it does not exercise this path.
+
+<details>
+<summary>Original instructions (kept for the record)</summary>
 
 In `certinext_zabbix/zabbix_push.py`, `bucket_orders()` classifies every unrecognized
 non-empty `order_status` as **failed** via its `elif status:` catch-all.
@@ -104,6 +179,8 @@ stops being true.
 **Verification:** unit tests covering an `Order In-Progress` record both with and
 without a certificate expiry date. Then a prod `--dry-run --order-health` and confirm
 `failed_recent` drops to 0 and `unissued` rises by 1.
+
+</details>
 
 ## Step 3 — Decide the `failed_recent` trigger shape (OPEN — not decided)
 
@@ -147,6 +224,26 @@ except a sandbox problem paging someone.
   alerted on.
 - Docstrings in `zabbix_push.py` for any bucketing change in step 2.
 - Annotated tag message for whatever release carries this, per house convention.
+
+## Outstanding as of 2026-08-17
+
+Steps 1 and 2 are implemented, unit-tested, and step 2 is confirmed against live
+production. What remains needs either a human in the Zabbix UI or a decision:
+
+Issue links below point at `gitlab.its.maine.edu`, the University of Maine System's
+**internal** GitLab instance — not reachable from the public internet, and not the
+GitHub mirror you may be reading this on.
+
+| # | Item | Blocked on | Issue |
+|---|---|---|---|
+| 1 | Re-import the template and confirm no `orders.expiring` trigger appears | Zabbix UI | [internal #4](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/4) |
+| 2 | `failed_recent` trigger shape | A decision — see step 3 | [internal #6](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/6) |
+| 3 | Sandbox action condition suppresses notification but not the problem view | Zabbix UI | — |
+
+Running a live `--dry-run` needs the `keyring` package, which is not a dependency of
+this repo — see the "Live verification runs" section of
+[AGENTS.md](../../AGENTS.md). Without it the CLI dies on an interactive prompt with a
+bare `EOFError`, which reads as a broken CLI rather than a missing optional package.
 
 ## Still-open dependencies
 
