@@ -255,6 +255,24 @@ class TestBucketOrders:
         assert buckets.undownloaded == [generated]
         assert buckets.unissued == [awaiting]
 
+    def test_in_progress_is_in_flight_not_failed(self) -> None:
+        """'Order In-Progress' buckets like 'Order Accepted', not as a failure.
+
+        Regression guard for sysadmin/certinext-zabbix#5. This value was
+        observed in prod on 2026-08-07 and fell through the failed
+        catch-all, which both inflated failed_recent and kept a genuinely
+        stuck order out of unissued, where the stuck-age trigger looks.
+        """
+        awaiting = _order("Order In-Progress")
+        generated = _order(
+            "Order In-Progress", certificate_expiry_date="2027-01-01T00:00:00",
+        )
+        buckets = bucket_orders([awaiting, generated])
+        assert buckets.unissued == [awaiting]
+        assert buckets.undownloaded == [generated]
+        assert not buckets.failed
+        assert not buckets.issued
+
     def test_unrecognized_status_counts_as_failed(self) -> None:
         # Rejected/expired/revoked orders have never been observed live, so
         # their order_status strings are unknown. An unknown terminal status

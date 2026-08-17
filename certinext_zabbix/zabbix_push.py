@@ -63,7 +63,7 @@ _SECONDS_PER_DAY = 86400
 
 # OrderRecord.order_status values used to bucket the orders report.
 #
-# These are the only two values we classify positively; everything else is
+# These are the only values we classify positively; everything else is
 # treated as a failure (see :func:`bucket_orders`). We deliberately do NOT
 # filter server-side on the vendor's ``status`` param: 5 of its 6 documented
 # ``pending-*`` values return HTTP 422 (sysadmin/certinext-zabbix#3, proven
@@ -75,6 +75,17 @@ _SECONDS_PER_DAY = 86400
 # pre-1.1.0 certinext bug this design avoids repeating.
 ORDER_STATUS_FULFILLED = "Order Fulfilled"
 ORDER_STATUS_ACCEPTED = "Order Accepted"
+ORDER_STATUS_IN_PROGRESS = "Order In-Progress"
+
+# Statuses meaning "the order is still moving" — not terminal either way.
+# Both are split again on certificate presence by :func:`bucket_orders`.
+#
+# ``Order In-Progress`` was observed in prod on 2026-08-07 and until then
+# fell through to the failed catch-all, which was wrong in two directions:
+# it inflated failed_recent, and it kept a genuinely stuck order out of
+# unissued where the stuck-age trigger would have found it
+# (sysadmin/certinext-zabbix#5).
+ORDER_STATUSES_IN_FLIGHT = frozenset({ORDER_STATUS_ACCEPTED, ORDER_STATUS_IN_PROGRESS})
 
 
 class DomainScope(str, Enum):
@@ -327,17 +338,18 @@ def fetch_orders(
 def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
     """Split *records* four ways on ``order_status`` and cert presence.
 
-    Only :data:`ORDER_STATUS_FULFILLED` and :data:`ORDER_STATUS_ACCEPTED`
-    are classified positively; every other non-empty ``order_status`` falls
-    into :attr:`~OrderBuckets.failed`. That catch-all is deliberate — a
-    live 100-row prod sample carried only ``"Order Cancelled"`` as a third
+    Only :data:`ORDER_STATUS_FULFILLED` and the
+    :data:`ORDER_STATUSES_IN_FLIGHT` members are classified positively;
+    every other non-empty ``order_status`` falls into
+    :attr:`~OrderBuckets.failed`. That catch-all is deliberate — a live
+    100-row prod sample carried only ``"Order Cancelled"`` as a third
     value, but the vendor's rejected/expired/revoked orders have never been
     observed and their ``order_status`` strings are undocumented. Treating
     an unknown terminal status as a failure surfaces it on the
     failed-recent metric rather than silently dropping it from every
     bucket. Unrecognized values are logged once per run so drift is visible.
 
-    An accepted order is split again on whether a certificate exists for
+    An in-flight order is split again on whether a certificate exists for
     it, because the two halves need different remediation: an order the CA
     never issued is chased through the issuance workflow (approval, DCV,
     CSR), whereas an issued-but-unfetched certificate is a delivery/
@@ -370,7 +382,7 @@ def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
         status = record.order_status
         if status == ORDER_STATUS_FULFILLED:
             buckets.issued.append(record)
-        elif status == ORDER_STATUS_ACCEPTED:
+        elif status in ORDER_STATUSES_IN_FLIGHT:
             if record.certificate_expiry_date is not None:
                 buckets.undownloaded.append(record)
             else:
