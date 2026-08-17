@@ -33,9 +33,9 @@ Correlating orders by common name showed what the 68 are made of:
 | already expired, superseded by a later cert | 10 | residue of a successful renewal |
 | already expired, newest cert for its CN | 3 | genuinely lapsed — the real signal |
 
-The clearest single case is `lv-o-swdist02.its.maine.edu`. It carries two
-orders: one placed 2026-07-16 (expiring 2026-08-15) and one placed
-2026-08-05 — two days before measurement — expiring 2026-09-04. The
+The clearest single case is an internal software-distribution host. It
+carries two orders: one placed 2026-07-16 (expiring 2026-08-15) and one
+placed 2026-08-05 — two days before measurement — expiring 2026-09-04. The
 metric counts the **brand-new renewal**, because a 30-day certificate
 sits inside a 30-day window from the moment it is issued. A trigger on
 this metric fires on a certificate that renewed successfully two days
@@ -85,8 +85,8 @@ number.
   accumulates from the day this ships rather than from the day the
   segmentation work starts.
 - Bad: a genuinely lapsed certificate raises no alert from *this* metric
-  until IDEA-005 lands. Partially mitigated today — `cm-unet1-ms.its.maine.edu`,
-  the one non-test lapsed cert found, is `Order Accepted` with a
+  until IDEA-005 lands. Partially mitigated today — the one non-test
+  lapsed cert found is `Order Accepted` with a
   certificate, so it is already surfaced by
   `certinext.orders.undownloaded`. That overlap is incidental, not a
   designed backstop, and does not cover a lapsed cert that *was*

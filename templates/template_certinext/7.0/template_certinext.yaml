@@ -383,22 +383,20 @@ zabbix_export:
         independent of DCV verification state — a cert can be expiring
         here while DCV is still fine, e.g. if renewal broke somewhere
         downstream of DCV.
+
+        DELIBERATELY HAS NO TRIGGER — do not add one. This is a
+        graph/capacity signal only. Production certificate lifetimes are
+        bimodal (~30-day, overwhelmingly ACME, and ~199-day) with nothing
+        expiring between 30 and 90 days out, so the count reads the same
+        at any threshold in that range and a freshly-renewed 30-day cert
+        is inside a 30-day window from the moment it is issued. No
+        threshold can separate healthy mid-life certs from genuinely
+        lapsed ones. See docs/adr/0008-orders-expiring-ships-data-only.md;
+        a trigger becomes possible once the metric is segmented by
+        originator (docs/wishlist/IDEA-005).
       tags:
       - tag: env
         value: prod
-      triggers:
-      - uuid: 2af361373bd34a069726232036a19224
-        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.expiring[prod])>0'
-        name: 'CertiNext prod: issued certificate(s) expiring soon'
-        opdata: 'expiring: {ITEM.LASTVALUE1}'
-        priority: WARNING
-        description: |
-          At least one issued certificate expires within
-          --order-cert-expiry-days. Check the account in CertiNext for
-          which order, and whether a renewal is already in flight.
-        tags:
-        - tag: env
-          value: prod
     - uuid: 025434e05c904e598dae9654d37c3675
       name: 'CertiNext prod: Days since last certificate issued'
       type: TRAP
@@ -698,21 +696,14 @@ zabbix_export:
       description: |
         Sandbox issued orders whose certificate_expiry_date falls within
         the pusher's --order-cert-expiry-days (including already-expired).
+
+        DELIBERATELY HAS NO TRIGGER — do not add one. Matches the prod
+        item: a graph/capacity signal only, because no threshold can
+        separate healthy short-lived certs from genuinely lapsed ones.
+        See docs/adr/0008-orders-expiring-ships-data-only.md.
       tags:
       - tag: env
         value: sandbox
-      triggers:
-      - uuid: bbbc4ec769b5474687476c9d99b37af7
-        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.expiring[sandbox])>0'
-        name: 'CertiNext sandbox: issued certificate(s) expiring soon'
-        opdata: 'expiring: {ITEM.LASTVALUE1}'
-        priority: WARNING
-        description: |
-          Sandbox issued certificate(s) expiring within
-          --order-cert-expiry-days. Often a deliberate test state.
-        tags:
-        - tag: env
-          value: sandbox
     - uuid: 765bf06a961d4be8ae7982e3525be5b3
       name: 'CertiNext sandbox: Days since last certificate issued'
       type: TRAP

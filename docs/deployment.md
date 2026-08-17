@@ -170,10 +170,13 @@ deployment sequence:
    [templates/template_certinext/7.0/template_certinext.yaml](../templates/template_certinext/7.0/template_certinext.yaml)
    via *Data collection → Templates → Import*. It creates **CertiNext DCV
    by Zabbix trapper**: eighteen trapper items (each metric twice, key-
-   parameterized `[prod]` / `[sandbox]`), twenty-six triggers (including a
+   parameterized `[prod]` / `[sandbox]`), twenty-four triggers (including a
    per-environment DCV-expiry severity gradient — WARNING → AVERAGE →
    HIGH → DISASTER, dependency-chained so only the deepest tier alerts),
-   and the macros. The three sandbox `nodata()` triggers ship **disabled**
+   and the macros. Two items ship deliberately trigger-less:
+   `certinext.orders.expiring` (per
+   [ADR 0008](adr/0008-orders-expiring-ships-data-only.md)) and
+   `certinext.orders.days_since_issued`. The three sandbox `nodata()` triggers ship **disabled**
    — enable them only once sandbox runs are scheduled.
 2. **Link** the template to the sending host's Zabbix host entry.
 3. The host entry's **"Host name" field must exactly match** what the

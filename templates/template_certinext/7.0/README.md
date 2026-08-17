@@ -72,6 +72,7 @@ Each exists twice — `[prod]` and `[sandbox]` — via the Zabbix key parameter.
 | `certinext.orders.unissued[<env>]` | Unsigned | Orders the CA has accepted but not yet generated a certificate for — still working through approval, DCV, CSR, documents, or the agreement. |
 | `certinext.orders.undownloaded[<env>]` | Unsigned | Orders whose certificate was generated but never downloaded — a delivery/automation failure rather than an issuance one. |
 | `certinext.orders.failed_recent[<env>]` | Unsigned | Orders in a terminal non-fulfilled state (cancelled, and by the catch-all rule any unrecognized `order_status`) dated within the pusher's `--order-failing-lookback-days` window (default 30 days). |
+| `certinext.orders.expiring[<env>]` | Unsigned | Issued orders whose `certificate_expiry_date` falls within the pusher's `--order-cert-expiry-days` (default 30), already-expired included. Distinct from `certinext.dcv.expiring`: this is the certificate's own expiry per the CA's order record, independent of DCV state. **Deliberately has no trigger** — see [Triggers](#triggers). |
 | `certinext.orders.days_since_issued[<env>]` | Float (days) | Days since the CA most recently generated a certificate, by `order_date` — spans both downloaded and undownloaded certs. No trigger yet — see [Triggers](#triggers). |
 
 Neither order count is named "pending": the vendor's `status` enum uses
@@ -84,8 +85,9 @@ free-text `certificate_status` display string.
 The domain-list metrics (`total`, `unverified`) are pushed every frequent
 run; the expiry metrics (`expiring`, `min_days_left`) are pushed only by the
 daily run invoked with `--expiry-days`; the order-health metrics
-(`unissued`, `undownloaded`, `failed_recent`, `days_since_issued`) are
-pushed only by the daily run invoked with `--order-health`.
+(`unissued`, `undownloaded`, `failed_recent`, `orders.expiring`,
+`days_since_issued`) are pushed only by the daily run invoked with
+`--order-health`.
 
 Order-health metrics deliberately avoid the vendor's free-text
 `certificate_status` field for classification — only the server-side
@@ -105,7 +107,7 @@ ships — expected, not a monitoring fault.
 
 ## Triggers
 
-22 total (11 per environment):
+24 total (12 per environment):
 
 | Trigger | Severity | Fires on |
 |---|---|---|
@@ -119,18 +121,32 @@ ships — expected, not a monitoring fault.
 | DCV expires within `{$CERTINEXT.DCV.WARN_DAYS}` days | WARNING | `min_days_left` ≤ `{$CERTINEXT.DCV.WARN_DAYS}`; dependency-chained under AVERAGE. |
 | order(s) stuck awaiting issuance | AVERAGE | `unissued` > 0 for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`. |
 | certificate(s) generated but never downloaded | WARNING | `undownloaded` > 0 for the whole of `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}`. |
+| recent order failure(s) | WARNING | `failed_recent` > 0 (already date-filtered by the pusher, so no Zabbix-side window needed). |
 | no data from pusher (daily order-health run) | WARNING | `nodata()` on `unissued` for `{$CERTINEXT.NODATA.DAILY}` — prod only; ships DISABLED for sandbox until a sandbox daily schedule exists. |
 
 > **Before enabling notifications:** both order-stuck triggers compare
 > against zero, so they fire immediately against an account carrying a
 > backlog of abandoned orders from earlier experimentation. Cancel those
 > stale orders first, or the triggers will never clear.
-| recent order failure(s) | WARNING | `failed_recent` > 0 (already date-filtered by the pusher, so no Zabbix-side window needed). |
 
 The four DCV-expiry triggers are dependency-chained (most severe tier
 suppresses the less severe ones below it), so exactly one fires per domain
-state. `days_since_issued` has no trigger yet — see the note under
-[Metrics](#metrics-items).
+state.
+
+Two items ship with **no trigger at all**:
+
+- `certinext.orders.expiring` — deliberate and settled, not an oversight.
+  Production certificate lifetimes are bimodal (~30-day, overwhelmingly
+  ACME, and ~199-day) with nothing expiring between 30 and 90 days out, so
+  the count reads identically at any threshold in that range, and a
+  freshly-renewed 30-day certificate is inside a 30-day window from the
+  moment it is issued. No threshold separates healthy mid-life certs from
+  genuinely lapsed ones. See
+  [ADR 0008](../../../docs/adr/0008-orders-expiring-ships-data-only.md);
+  a trigger becomes possible once the metric is segmented by originator
+  ([IDEA-005](../../../docs/wishlist/IDEA-005-originator-alert-severity-bucketing.md)).
+- `days_since_issued` — no trigger yet; see the note under
+  [Metrics](#metrics-items).
 
 ## Author
 

@@ -50,8 +50,8 @@ monitoring is meaningless without this split.**
   ACME.
 - A 30-day certificate is inside a 30-day expiry window from the moment
   it is issued, so `certinext.orders.expiring` counts healthy,
-  freshly-renewed ACME certs. `lv-o-swdist02.its.maine.edu` was counted
-  two days after a successful renewal.
+  freshly-renewed ACME certs. One internal host was counted two days
+  after a successful renewal.
 - Correlating by common name, **all 3 genuinely-lapsed certificates
   (newest cert for their CN, already expired) are `CERTInext API`
   originator. None are ACME.**
@@ -115,7 +115,7 @@ approvals, or an ACME client broke and the alert took too long to fire.
 ## Cons
 
 - Doubles (or triples) the order-health item and trigger count, on a
-  template that already carries 18 items and 26 triggers.
+  template that already carries 18 items and 24 triggers.
 - Depends on vendor free-text-ish channel names. `originator` is a typed
   string field rather than a display string, but its value set is
   undocumented and observably account-specific, so the classification
