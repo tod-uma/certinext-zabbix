@@ -51,16 +51,24 @@ succeeded**, because a 30-day certificate is inside a 30-day window from the mom
 is issued.
 </details>
 
-## Prerequisite: cut stable releases first
+## Release sequencing — superseded 2026-08-19
 
-Tod's standing instruction (2026-08-07): promote these repos from alpha/rc to **real
-stable releases before starting the next round of major changes.** Everything is
-currently pre-release — `certinext-zabbix` 0.1.0rc8, `certinext` 1.2.0a7,
-`ums-certinext-scripts` 0.4.0rc2, `nm` 1.2.0a1. `certinext` has never had a stable
-tag; the `first-stable-release` skill covers that case.
+Tod's standing instruction (2026-08-07) was to promote these repos from alpha/rc to
+**real stable releases before starting the next round of major changes**, and this
+section originally required that *before* step 1 below.
 
-Do this **before** step 1 below. Any `pyproject.toml` version bump needs `uv lock` in
-the same commit, or `--locked` CI jobs go red immediately.
+**That ordering was reconsidered on 2026-08-19 and deliberately not followed here.**
+Steps 1–3 were already implemented and prod-verified by 2026-08-17, so the order-health
+work ships in **0.1.0rc9** rather than waiting behind a stable checkpoint of rc8. The
+stable `0.1.0` tag is deferred, not abandoned — it now comes after order-health has run
+on a live schedule, which is a better-evidenced stable than tagging rc8 would have been.
+
+The standing instruction still holds for the other three repos (`certinext`,
+`ums-certinext-scripts`, `nm`).
+
+Any `pyproject.toml` version bump needs `uv lock` in the same commit, or `--locked` CI
+jobs go red immediately. (`uv.lock` is untracked in *this* repo, so no CI job here reads
+it — but keep the local lock in step anyway.)
 
 ## Step 1 — Remove the `orders.expiring` triggers (implements ADR 0008) — DONE 2026-08-17
 
