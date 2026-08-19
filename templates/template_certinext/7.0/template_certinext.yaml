@@ -31,11 +31,20 @@ zabbix_export:
       per environment via key parameters ([prod] / [sandbox]); the pusher
       picks the parameter from its CertiNext connection. Two schedules
       feed each environment: a frequent run (domain totals) and a daily
-      run with --expiry-days (DCV expiry). nodata() triggers catch a dead
-      pusher. DCV expiry alerts escalate through a severity gradient on
-      min_days_left (WARNING 14d → AVERAGE 7d → HIGH 1d → DISASTER
-      lapsed, thresholds in the {$CERTINEXT.DCV.*_DAYS} macros),
-      dependency-chained so only the most severe tier fires.
+      run with --expiry-days and/or --order-health (DCV expiry and order
+      health). nodata() triggers catch a dead pusher. DCV expiry alerts
+      escalate through a severity gradient on min_days_left (WARNING 14d
+      → AVERAGE 7d → HIGH 1d → DISASTER lapsed, thresholds in the
+      {$CERTINEXT.DCV.*_DAYS} macros), dependency-chained so only the
+      most severe tier fires. Order-health alerts on orders stuck awaiting
+      issuance past {$CERTINEXT.ORDER.STUCK_AGE}, certificates generated
+      but left undownloaded past {$CERTINEXT.ORDER.UNDOWNLOADED_AGE}, and
+      orders that recently failed; days-since-last-issued is pushed with
+      no trigger yet, pending a baseline of normal cadence.
+
+      Both order-stuck triggers fire immediately against an account
+      carrying abandoned orders from earlier experimentation — clear that
+      backlog before enabling notifications. See docs/deployment.md.
 
       Every item and trigger is tagged env:prod or env:sandbox — filter
       notification actions on that tag to keep sandbox problems silent.
@@ -232,6 +241,195 @@ zabbix_export:
         tags:
         - tag: env
           value: prod
+        # ------------------------------------------------ order health ---
+        # Orders Report metrics (--order-health on the daily pusher run).
+        # Deliberately does not use certificate_status (a vendor free-text
+        # display string) for classification. The pusher fetches the report
+        # unfiltered — the vendor's server-side status filter rejects 5 of
+        # its 6 pending-* values with HTTP 422 (sysadmin/certinext-zabbix#3)
+        # — and buckets client-side on order_status plus whether
+        # certificate_expiry_date is populated, both typed fields confirmed
+        # reliable against live data. See certinext_zabbix.zabbix_push's
+        # module docstring and bucket_orders().
+    - uuid: 36fcfa47611941048ec7e3604f1f9e93
+      name: 'CertiNext prod: Orders awaiting issuance'
+      type: TRAP
+      key: 'certinext.orders.unissued[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Orders the CA has accepted but not yet generated a certificate for
+        — still working through approval, DCV, CSR, documents, or the
+        agreement. Deliberately NOT named "pending": the vendor's status
+        enum uses pending-* for the whole pre-fulfillment space, which
+        spans this item AND "Orders awaiting download".
+
+        Nonzero is normal briefly while an order works through issuance;
+        sustained nonzero means an order is stuck.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 3d57df86a88f4fc2acc0b29ad6698d26
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[prod],{$CERTINEXT.ORDER.STUCK_AGE})>0'
+        name: 'CertiNext prod: order(s) stuck awaiting issuance'
+        opdata: 'awaiting issuance: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          At least one order has been awaiting issuance for the whole of
+          {$CERTINEXT.ORDER.STUCK_AGE}. Check the account in CertiNext for
+          which order and lifecycle step is stuck (CSR not submitted,
+          agreement not accepted, approval pending, etc.).
+
+          NOTE: this fires immediately against an account carrying a
+          backlog of abandoned orders from earlier experimentation. Cancel
+          those stale orders before enabling notifications, or the trigger
+          will never clear. See docs/deployment.md.
+        tags:
+        - tag: env
+          value: prod
+      - uuid: 8d293822e167437e9d51288da3303c24
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[prod],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext prod: no data from pusher (daily order-health run)'
+        priority: WARNING
+        description: |
+          No value received for {$CERTINEXT.NODATA.DAILY} — the
+          --order-health daily timer is dead, erroring before the send, or
+          the CertiNext API has been down across several runs. Check the
+          timer and its journal on the sending host.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: a8ecce98b1714e058bf6cffefdf848c3
+      name: 'CertiNext prod: Orders awaiting download'
+      type: TRAP
+      key: 'certinext.orders.undownloaded[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Orders whose certificate the CA has generated but nobody has
+        downloaded. Distinct from "Orders awaiting issuance": the
+        certificate exists and is already counting down its validity, it
+        just was never collected — so this is a delivery/automation
+        failure, not an issuance one. A cert billed for and never deployed
+        also silently ages into the expiring-soon count.
+
+        Typical causes: an ACME client that errored after the order was
+        finalized, or a manual portal order nobody came back for.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: c5dee50551ba458ba87ab845859494e7
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.undownloaded[prod],{$CERTINEXT.ORDER.UNDOWNLOADED_AGE})>0'
+        name: 'CertiNext prod: certificate(s) generated but never downloaded'
+        opdata: 'awaiting download: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          At least one generated certificate has gone uncollected for the
+          whole of {$CERTINEXT.ORDER.UNDOWNLOADED_AGE}. Download it from
+          the CertiNext portal and deploy it, or cancel the order if it is
+          no longer wanted — an uncollected certificate keeps expiring on
+          the CA's schedule regardless.
+
+          NOTE: like the awaiting-issuance trigger, this fires immediately
+          against an account carrying abandoned orders from earlier
+          experimentation. Clear that backlog first. See docs/deployment.md.
+        tags:
+        - tag: env
+          value: prod
+    - uuid: 69c512fd0a1540bc947a2e62242709fe
+      name: 'CertiNext prod: Orders failed recently'
+      type: TRAP
+      key: 'certinext.orders.failed_recent[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Orders in a terminal non-fulfilled state within the pusher's
+        --order-failing-lookback-days window (default 30 days). Older
+        failures are normal account history and are excluded — this is
+        meant to flag a *recent* failure, not accumulate forever.
+
+        CANCELLED ORDERS ARE DELIBERATELY EXCLUDED. Cancelling an order is
+        routine administrative work; every order that has ever landed in
+        this bucket in production was a cancellation, which would have held
+        the trigger below in PROBLEM 83% of the measured period while
+        signalling nothing. So in practice this counts terminal statuses
+        the pusher does not recognize at all — see
+        docs/adr/0010-cancelled-orders-are-not-failures.md.
+      tags:
+      - tag: env
+        value: prod
+      triggers:
+      - uuid: 9102245241324df4b0904326a11308c9
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.failed_recent[prod])>0'
+        name: 'CertiNext prod: recent order failure(s)'
+        opdata: 'failed recently: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          An order reached a terminal state the pusher does not recognize
+          (not fulfilled, not in flight, not a cancellation) within the
+          lookback window. Rejected/expired/revoked orders have never been
+          observed in this account, so this firing means something genuinely
+          new happened. Check the account in CertiNext for which order and
+          why, and consider whether the new status needs classifying in
+          bucket_orders().
+        tags:
+        - tag: env
+          value: prod
+    - uuid: aa38ebcda1ae44b68e40ba79a466f9a9
+      name: 'CertiNext prod: Issued certificates expiring soon'
+      type: TRAP
+      key: 'certinext.orders.expiring[prod]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Issued orders whose certificate_expiry_date falls within the
+        pusher's --order-cert-expiry-days (including already-expired).
+        A distinct signal from certinext.dcv.expiring: this tracks the
+        issued certificate's own expiry per the CA's order record,
+        independent of DCV verification state — a cert can be expiring
+        here while DCV is still fine, e.g. if renewal broke somewhere
+        downstream of DCV.
+
+        DELIBERATELY HAS NO TRIGGER — do not add one. This is a
+        graph/capacity signal only. Production certificate lifetimes are
+        bimodal (~30-day, overwhelmingly ACME, and ~199-day) with nothing
+        expiring between 30 and 90 days out, so the count reads the same
+        at any threshold in that range and a freshly-renewed 30-day cert
+        is inside a 30-day window from the moment it is issued. No
+        threshold can separate healthy mid-life certs from genuinely
+        lapsed ones. See docs/adr/0008-orders-expiring-ships-data-only.md;
+        a trigger becomes possible once the metric is segmented by
+        originator (docs/wishlist/IDEA-005).
+      tags:
+      - tag: env
+        value: prod
+    - uuid: 025434e05c904e598dae9654d37c3675
+      name: 'CertiNext prod: Days since last certificate issued'
+      type: TRAP
+      key: 'certinext.orders.days_since_issued[prod]'
+      delay: '0'
+      value_type: FLOAT
+      units: d
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days since the most recent order with an "issued" certificate
+        status, by order_date. No severity trigger yet — this item is
+        intentionally trigger-less until there's enough history to know
+        what a normal issuance cadence looks like for this account; see
+        docs/wishlist/IDEA-003-days-since-issued-alert-threshold.md.
+        Absent when no order in the "issued" status filter carries a
+        parseable order_date.
+      tags:
+      - tag: env
+        value: prod
         # ---------------------------------------------------- sandbox ---
         # Mirror of the prod items/triggers with the [sandbox] key
         # parameter and env:sandbox tags. Same severities — mute the
@@ -407,6 +605,137 @@ zabbix_export:
         tags:
         - tag: env
           value: sandbox
+        # ------------------------------------------------ order health ---
+    - uuid: 1a7c3c5a63bc487b971b783d87a804c1
+      name: 'CertiNext sandbox: Orders awaiting issuance'
+      type: TRAP
+      key: 'certinext.orders.unissued[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox orders accepted but with no certificate generated yet.
+        Often a deliberate test state.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: d223f5b2d3764be7a29f4d64fc0ed04e
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[sandbox],{$CERTINEXT.ORDER.STUCK_AGE})>0'
+        name: 'CertiNext sandbox: order(s) stuck awaiting issuance'
+        opdata: 'awaiting issuance: {ITEM.LASTVALUE1}'
+        priority: AVERAGE
+        description: |
+          Sandbox order(s) awaiting issuance for the whole of
+          {$CERTINEXT.ORDER.STUCK_AGE}. Often a deliberate test state —
+          notifications for env:sandbox should be muted at the action
+          level.
+        tags:
+        - tag: env
+          value: sandbox
+      - uuid: a6e206d90e194da09133c5dde105b233
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[sandbox],{$CERTINEXT.NODATA.DAILY})=1'
+        name: 'CertiNext sandbox: no data from pusher (daily order-health run)'
+        status: DISABLED
+        priority: WARNING
+        description: |
+          No sandbox value received for {$CERTINEXT.NODATA.DAILY}. Ships
+          DISABLED because nodata() fires even for items that have never
+          received data — enable this trigger once a sandbox
+          --order-health daily run is actually scheduled.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: 625f082da9d140de9bc2643a59c3c6c8
+      name: 'CertiNext sandbox: Orders awaiting download'
+      type: TRAP
+      key: 'certinext.orders.undownloaded[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox orders whose certificate was generated but never
+        downloaded. Often a deliberate test state.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 8336c4084d974f0baa19afdbedbcc183
+        expression: 'min(/CertiNext DCV by Zabbix trapper/certinext.orders.undownloaded[sandbox],{$CERTINEXT.ORDER.UNDOWNLOADED_AGE})>0'
+        name: 'CertiNext sandbox: certificate(s) generated but never downloaded'
+        opdata: 'awaiting download: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          Sandbox certificate(s) uncollected for the whole of
+          {$CERTINEXT.ORDER.UNDOWNLOADED_AGE}. Often a deliberate test
+          state — notifications for env:sandbox should be muted at the
+          action level.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: e7281e82ec8444ee9fdc8ba6f0f689d6
+      name: 'CertiNext sandbox: Orders failed recently'
+      type: TRAP
+      key: 'certinext.orders.failed_recent[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox orders in a terminal non-fulfilled state within the
+        pusher's --order-failing-lookback-days window. Cancellations are
+        deliberately excluded, as in prod — see
+        docs/adr/0010-cancelled-orders-are-not-failures.md.
+      tags:
+      - tag: env
+        value: sandbox
+      triggers:
+      - uuid: 45a5488b5ce14153be4c4afd78b266d2
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.orders.failed_recent[sandbox])>0'
+        name: 'CertiNext sandbox: recent order failure(s)'
+        opdata: 'failed recently: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        description: |
+          A sandbox order reached a terminal state the pusher does not
+          recognize (not fulfilled, not in flight, not a cancellation)
+          within the lookback window. Often a deliberate test state.
+        tags:
+        - tag: env
+          value: sandbox
+    - uuid: 7a20c6f0658b44258cec319b3f1212a1
+      name: 'CertiNext sandbox: Issued certificates expiring soon'
+      type: TRAP
+      key: 'certinext.orders.expiring[sandbox]'
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Sandbox issued orders whose certificate_expiry_date falls within
+        the pusher's --order-cert-expiry-days (including already-expired).
+
+        DELIBERATELY HAS NO TRIGGER — do not add one. Matches the prod
+        item: a graph/capacity signal only, because no threshold can
+        separate healthy short-lived certs from genuinely lapsed ones.
+        See docs/adr/0008-orders-expiring-ships-data-only.md.
+      tags:
+      - tag: env
+        value: sandbox
+    - uuid: 765bf06a961d4be8ae7982e3525be5b3
+      name: 'CertiNext sandbox: Days since last certificate issued'
+      type: TRAP
+      key: 'certinext.orders.days_since_issued[sandbox]'
+      delay: '0'
+      value_type: FLOAT
+      units: d
+      history: 90d
+      trends: 730d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Days since the most recent sandbox order with an "issued"
+        certificate status. No severity trigger yet — same deferral as
+        the prod item.
+      tags:
+      - tag: env
+        value: sandbox
     macros:
     - macro: '{$CERTINEXT.DCV.AVG_DAYS}'
       value: '7'
@@ -426,6 +755,12 @@ zabbix_export:
     - macro: '{$CERTINEXT.NODATA.FAST}'
       value: 13h
       description: 'nodata() window for the frequent items — one missed 6-hour run tolerated, two alert'
+    - macro: '{$CERTINEXT.ORDER.STUCK_AGE}'
+      value: 24h
+      description: 'How long an order may sit awaiting issuance (accepted, no certificate generated) before the "stuck" trigger fires'
+    - macro: '{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}'
+      value: 7d
+      description: 'How long a generated certificate may sit undownloaded before its trigger fires. Longer than STUCK_AGE: a manual portal order can legitimately wait for someone to collect it, whereas an ACME order should download within seconds'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'

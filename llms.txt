@@ -30,8 +30,8 @@ would do.
   automation for this repo.**
 - [Per-template README](templates/template_certinext/7.0/README.md):
   stands on its own for the "import the template" story — required
-  macros, the eight trapper items, the sixteen triggers, and an author
-  line, per the Zabbix community-templates conventions.
+  macros, the fourteen trapper items, the twenty-two triggers, and an
+  author line, per the Zabbix community-templates conventions.
 - [examples/systemd/](examples/systemd/), [examples/cron/](examples/cron/),
   [examples/windows/](examples/windows/): ready-to-adapt unit files,
   cron lines, and Task Scheduler scripts referenced from

@@ -30,6 +30,40 @@ uv run pyright
 All tests are offline (mocked CertiNext sessions, typer `CliRunner`) — no
 credentials needed, safe anywhere.
 
+## Live verification runs (`--dry-run`)
+
+Some changes can only be confirmed against the real account — bucketing
+rules in particular, since the vendor introduces `order_status` values
+that no fixture predicts. `--dry-run` computes and prints every metric
+and sends nothing to Zabbix:
+
+```bash
+uv run certinext-zabbix-push --order-health --dry-run \
+    --zabbix-server 127.0.0.1 --zabbix-host dry-run.invalid   # prod
+uv run certinext-zabbix-push --profile sandbox --order-health --dry-run \
+    --zabbix-server 127.0.0.1 --zabbix-host dry-run.invalid   # sandbox
+```
+
+Two things trip this up:
+
+- **`keyring` is required and is not a dependency of this repo.** Client
+  secrets live in the OS keyring, not in
+  `certinext`'s `config.toml` (that file holds only non-secret defaults
+  like `org_id`). Without it, `certinext`'s credential lookup falls
+  through to an interactive prompt and dies with a bare
+  `EOFError: EOF when reading a line` — which looks like a broken CLI
+  rather than a missing optional package. Install it with
+  `uv pip install keyring` (it is `certinext`'s `keyring` extra), and
+  omit `--profile` for prod; the profiles in `config.toml` are all
+  sandbox.
+- **`--zabbix-server` is required even under `--dry-run`**, which never
+  opens a socket to Zabbix. Pass any placeholder.
+
+On Windows, `uv` can fail to install console scripts with
+`Failed to update Windows PE resources … Access is denied` when `TMPDIR`
+points at an 8.3-shortened path (`C:\Users\TOD~1.DET\…`). Set `TMPDIR`
+to a normal long path and retry.
+
 **CI gotcha:** `.gitlab-ci.yml` sets `PY_COLORS='1'`, which typer bakes
 into `rich_utils.FORCE_TERMINAL` at import time, forcing ANSI codes into
 captured `--help` output. `tests/conftest.py` neutralizes this with

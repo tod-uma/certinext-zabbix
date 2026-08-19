@@ -1,5 +1,5 @@
 [Unit]
-Description=Push CertiNext DCV expiry metrics to Zabbix (daily)
+Description=Push CertiNext DCV expiry and order-health metrics to Zabbix (daily)
 Documentation=https://github.com/tod-uma/certinext-zabbix
 Wants=network-online.target
 After=network-online.target
@@ -9,7 +9,7 @@ Type=oneshot
 User=certinextzbx
 Group=certinextzbx
 EnvironmentFile=/etc/certinext-zabbix/certinext-zabbix.env
-ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14
+ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 --order-health
 # SIGTERM mid-run exits 130 after cleanup; treat an operator stop as success.
 SuccessExitStatus=130
 NoNewPrivileges=yes

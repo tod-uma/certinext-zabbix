@@ -78,7 +78,7 @@ Creates:
 
 - **CertiNext Zabbix Push** — every 15 minutes, indefinitely.
 - **CertiNext Zabbix Push - Expiry** — daily at 03:12, with
-  `--expiry-days 14`.
+  `--expiry-days 14 --order-health`.
 
 Re-run the script to update an existing registration; it unregisters
 before re-registering.
@@ -97,7 +97,7 @@ environment.
 
 ```powershell
 # 1. Metrics computed correctly, nothing sent
-& C:\certinext-zabbix\venv\Scripts\certinext-zabbix-push.exe --dry-run --expiry-days 14 -v
+& C:\certinext-zabbix\venv\Scripts\certinext-zabbix-push.exe --dry-run --expiry-days 14 --order-health -v
 
 # 2. Trigger a real run and check Task Scheduler's history
 Start-ScheduledTask -TaskName "CertiNext Zabbix Push"

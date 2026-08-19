@@ -5,7 +5,7 @@ time, so the metric math is deterministic and offline. The trapper send is
 covered by patching the Sender class — no sockets are opened.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +13,7 @@ import httpx
 import pytest
 from certinext.exceptions import CertiNextAPIError
 from certinext.models.domains import Domain
+from certinext.orders import OrderRecord
 from zabbix_utils.exceptions import ProcessingError
 
 from certinext_zabbix.zabbix_push import (
@@ -20,11 +21,20 @@ from certinext_zabbix.zabbix_push import (
     ENV_SANDBOX,
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
+    KEY_ORDERS_DAYS_SINCE_ISSUED,
+    KEY_ORDERS_EXPIRING,
+    KEY_ORDERS_FAILED_RECENT,
+    KEY_ORDERS_UNDOWNLOADED,
+    KEY_ORDERS_UNISSUED,
     KEY_TOTAL,
     KEY_UNVERIFIED,
     DomainScope,
+    OrderBuckets,
+    bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
+    collect_order_metrics,
+    fetch_orders,
     item_key,
     push_metrics,
     refresh_domain,
@@ -143,6 +153,316 @@ class TestCollectExpiryMetrics:
         assert collect_expiry_metrics([], 14, ENV_SANDBOX, now=_NOW) == {
             "certinext.dcv.expiring[sandbox]": 0,
         }
+
+
+def _order(
+    order_status: str = "Order Accepted",
+    order_date: str | None = None,
+    certificate_expiry_date: str | None = None,
+) -> OrderRecord:
+    """Build an OrderRecord from wire-format fields for order-health tests.
+
+    Args:
+        order_status: Value for the ``orderStatus`` wire field.
+        order_date: ISO timestamp for ``orderDate``, or None to omit it.
+        certificate_expiry_date: ISO timestamp for ``certificateExpiryDate``,
+            or None to omit it.
+
+    Returns:
+        A validated OrderRecord (no API client attached — field access only).
+    """
+    payload: dict[str, Any] = {"orderStatus": order_status}
+    if order_date is not None:
+        payload["orderDate"] = order_date
+    if certificate_expiry_date is not None:
+        payload["certificateExpiryDate"] = certificate_expiry_date
+    return OrderRecord.model_validate(payload)
+
+
+class TestFetchOrders:
+    """The orders fetch is unfiltered, date-boundable, and retried."""
+
+    def test_never_sends_a_status_filter(self) -> None:
+        # Regression guard for sysadmin/certinext-zabbix#3: 5 of the 6
+        # documented pending-* status values return HTTP 422, so any
+        # status-filtered fetch is dead on arrival. Bucketing is client-side.
+        accessor = MagicMock()
+        accessor.get_list.return_value = [_order()]
+        fetch_orders(accessor)
+        assert accessor.get_list.call_args_list == [((), {"since": None})]
+
+    def test_since_passed_through(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.return_value = [_order()]
+        cutoff = date(2026, 7, 1)
+        fetch_orders(accessor, since=cutoff)
+        assert accessor.get_list.call_args_list == [((), {"since": cutoff})]
+
+    def test_retries_transient_failure_then_succeeds(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = [httpx.ReadTimeout("timed out"), [_order()]]
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            records = fetch_orders(accessor)
+        assert len(records) == 1
+        mock_sleep.assert_called_once_with(5.0)
+
+    def test_exhausts_attempts_and_raises(self) -> None:
+        accessor = MagicMock()
+        accessor.get_list.side_effect = CertiNextAPIError(503, "service unavailable")
+        with patch("certinext_zabbix.zabbix_push.time.sleep"), \
+             pytest.raises(CertiNextAPIError):
+            fetch_orders(accessor, attempts=2, retry_delay=0.1)
+        assert accessor.get_list.call_count == 2
+
+    def test_rejected_status_filter_surfaces_rather_than_zeroing(self) -> None:
+        # The exact failure issue #3 predicted: a 422 must propagate so the
+        # caller skips the metrics loudly, never silently push a zero.
+        accessor = MagicMock()
+        accessor.get_list.side_effect = CertiNextAPIError(422, "invalid status")
+        with patch("certinext_zabbix.zabbix_push.time.sleep"), \
+             pytest.raises(CertiNextAPIError) as excinfo:
+            fetch_orders(accessor, attempts=1)
+        assert excinfo.value.status_code == 422
+
+
+class TestBucketOrders:
+    """Client-side bucketing on order_status, with an unknown-is-failed rule."""
+
+    def test_splits_every_bucket(self) -> None:
+        buckets = bucket_orders([
+            _order("Order Fulfilled", certificate_expiry_date="2027-01-01T00:00:00"),
+            _order("Order Accepted"),
+            _order("Order Accepted", certificate_expiry_date="2027-01-01T00:00:00"),
+            _order("Order Cancelled"),
+            _order("Order Something Unknown"),
+        ])
+        assert len(buckets.issued) == 1
+        assert len(buckets.unissued) == 1
+        assert len(buckets.undownloaded) == 1
+        assert len(buckets.cancelled) == 1
+        assert len(buckets.failed) == 1
+
+    def test_accepted_split_keys_on_expiry_date_not_display_string(self) -> None:
+        """An accepted order with a cert expiry is generated-but-unfetched.
+
+        Keys on the typed certificate_expiry_date, never on the free-text
+        certificate_status display string. The two agree across the whole
+        prod+sandbox corpus; only the date is safe to compare against.
+        """
+        generated = _order(
+            "Order Accepted", certificate_expiry_date="2027-01-01T00:00:00",
+        )
+        awaiting = _order("Order Accepted")
+        buckets = bucket_orders([generated, awaiting])
+        assert buckets.undownloaded == [generated]
+        assert buckets.unissued == [awaiting]
+
+    def test_in_progress_is_in_flight_not_failed(self) -> None:
+        """'Order In-Progress' buckets like 'Order Accepted', not as a failure.
+
+        Regression guard for sysadmin/certinext-zabbix#5. This value was
+        observed in prod on 2026-08-07 and fell through the failed
+        catch-all, which both inflated failed_recent and kept a genuinely
+        stuck order out of unissued, where the stuck-age trigger looks.
+        """
+        awaiting = _order("Order In-Progress")
+        generated = _order(
+            "Order In-Progress", certificate_expiry_date="2027-01-01T00:00:00",
+        )
+        buckets = bucket_orders([awaiting, generated])
+        assert buckets.unissued == [awaiting]
+        assert buckets.undownloaded == [generated]
+        assert not buckets.failed
+        assert not buckets.issued
+
+    def test_cancelled_is_not_a_failure(self) -> None:
+        """Cancelling an order is routine admin work, not an incident.
+
+        Every row ever observed in the failed bucket in production was a
+        cancellation, so counting them would have held the failed-recent
+        trigger in PROBLEM 83% of the measured period while signalling
+        nothing. See docs/adr/0010-cancelled-orders-are-not-failures.md.
+        """
+        cancelled = _order("Order Cancelled", order_date="2026-08-16T00:00:00")
+        buckets = bucket_orders([cancelled])
+        assert buckets.cancelled == [cancelled]
+        assert not buckets.failed
+
+    def test_cancelled_excluded_from_failed_recent_metric(self) -> None:
+        # End-to-end guard: a fresh cancellation must not raise the metric
+        # the WARNING trigger reads, however recent it is.
+        now = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        buckets = bucket_orders([_order("Order Cancelled", order_date="2026-08-16T00:00:00")])
+        metrics = collect_order_metrics(
+            buckets, ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=now,
+        )
+        assert metrics["certinext.orders.failed_recent[prod]"] == 0
+
+    def test_unrecognized_status_counts_as_failed(self) -> None:
+        # Rejected/expired/revoked orders have never been observed live, so
+        # their order_status strings are unknown. An unknown terminal status
+        # must surface on failed-recent, not vanish from every bucket.
+        buckets = bucket_orders([_order("Order Revoked"), _order("Something New")])
+        assert len(buckets.failed) == 2
+        assert not buckets.unissued and not buckets.undownloaded and not buckets.issued
+
+    def test_missing_status_counted_nowhere(self) -> None:
+        buckets = bucket_orders([OrderRecord.model_validate({}), _order("Order Accepted")])
+        assert len(buckets.unissued) == 1
+        assert not buckets.issued and not buckets.undownloaded and not buckets.failed
+
+    def test_empty_input(self) -> None:
+        assert bucket_orders([]) == OrderBuckets(
+            unissued=[], undownloaded=[], failed=[], issued=[], cancelled=[],
+        )
+
+
+def _buckets(
+    unissued: list[OrderRecord] | None = None,
+    undownloaded: list[OrderRecord] | None = None,
+    failed: list[OrderRecord] | None = None,
+    issued: list[OrderRecord] | None = None,
+    cancelled: list[OrderRecord] | None = None,
+) -> OrderBuckets:
+    """Build an OrderBuckets with only the buckets a test cares about.
+
+    Args:
+        unissued: Orders accepted with no certificate generated.
+        undownloaded: Orders whose certificate exists but was never fetched.
+        failed: Orders in a terminal non-fulfilled state.
+        issued: Orders fulfilled (certificate generated and downloaded).
+        cancelled: Orders deliberately cancelled — terminal but routine.
+
+    Returns:
+        An OrderBuckets with unsupplied buckets empty.
+    """
+    return OrderBuckets(
+        unissued=unissued or [], undownloaded=undownloaded or [],
+        failed=failed or [], issued=issued or [], cancelled=cancelled or [],
+    )
+
+
+class TestCollectOrderMetrics:
+    """Counts and days-since-issued derived from pre-bucketed orders."""
+
+    def test_unissued_and_undownloaded_count_their_buckets_verbatim(self) -> None:
+        # bucket_orders owns the classification; this must not re-filter, or
+        # a record it deliberately placed here would be silently dropped.
+        metrics = collect_order_metrics(
+            _buckets(
+                unissued=[_order(), _order()],
+                undownloaded=[_order(certificate_expiry_date="2027-01-01T00:00:00")],
+            ),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_UNISSUED, ENV_PROD)] == 2
+        assert metrics[item_key(KEY_ORDERS_UNDOWNLOADED, ENV_PROD)] == 1
+
+    def test_failed_recent_excludes_orders_outside_lookback(self) -> None:
+        failed = [
+            _order(order_date="2026-07-01T00:00:00"),   # 12d old — within 30d lookback
+            _order(order_date="2025-01-01T00:00:00"),    # ancient — outside lookback
+        ]
+        metrics = collect_order_metrics(
+            _buckets(failed=failed),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+
+    def test_failed_recent_boundary_day_counts(self) -> None:
+        failed = [_order(order_date="2026-06-13T12:00:00")]  # exactly 30d before _NOW
+        metrics = collect_order_metrics(
+            _buckets(failed=failed),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+
+    def test_days_since_issued_uses_max_order_date(self) -> None:
+        issued = [
+            _order(order_date="2026-07-10T12:00:00"),  # 3d ago
+            _order(order_date="2026-07-01T12:00:00"),  # 12d ago — not the max
+        ]
+        metrics = collect_order_metrics(
+            _buckets(issued=issued),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
+
+    def test_days_since_issued_counts_undownloaded_certs_too(self) -> None:
+        # The CA issued it; nobody fetched it. That still proves issuance is
+        # working, which is the only thing this metric claims to measure.
+        metrics = collect_order_metrics(
+            _buckets(
+                issued=[_order(order_date="2026-07-01T12:00:00")],       # 12d ago
+                undownloaded=[_order(order_date="2026-07-10T12:00:00")],  # 3d ago
+            ),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
+
+    def test_no_issued_orders_omits_days_since_issued(self) -> None:
+        metrics = collect_order_metrics(
+            _buckets(), ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+
+    def test_issued_order_with_no_order_date_is_excluded(self) -> None:
+        metrics = collect_order_metrics(
+            _buckets(issued=[_order()]),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+
+    def test_sandbox_env_reaches_keys(self) -> None:
+        metrics = collect_order_metrics(
+            _buckets(), ENV_SANDBOX, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+        )
+        assert metrics == {
+            item_key(KEY_ORDERS_UNISSUED, ENV_SANDBOX): 0,
+            item_key(KEY_ORDERS_UNDOWNLOADED, ENV_SANDBOX): 0,
+            item_key(KEY_ORDERS_FAILED_RECENT, ENV_SANDBOX): 0,
+            item_key(KEY_ORDERS_EXPIRING, ENV_SANDBOX): 0,
+        }
+
+    def test_defaults_now_to_current_time(self) -> None:
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        metrics = collect_order_metrics(
+            _buckets(issued=[_order(order_date=recent.isoformat())]),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30,
+        )
+        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == pytest.approx(1.0, abs=0.01)
+
+    def test_expiring_counts_issued_certs_within_lead_time(self) -> None:
+        issued = [
+            _order(certificate_expiry_date="2026-07-20T12:00:00"),  # +7d → expiring
+            _order(certificate_expiry_date="2026-09-01T12:00:00"),  # +50d → fine
+            _order(certificate_expiry_date="2026-07-10T12:00:00"),  # -3d → expiring (lapsed)
+            _order(),                                                # no expiry date → excluded
+        ]
+        metrics = collect_order_metrics(
+            _buckets(issued=issued),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 2
+
+    def test_expiring_counts_undownloaded_certs_too(self) -> None:
+        # An unfetched certificate still expires on the CA's schedule.
+        metrics = collect_order_metrics(
+            _buckets(
+                issued=[_order(certificate_expiry_date="2026-07-20T12:00:00")],
+                undownloaded=[_order(certificate_expiry_date="2026-07-18T12:00:00")],
+            ),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 2
+
+    def test_expiring_boundary_day_counts(self) -> None:
+        issued = [_order(certificate_expiry_date="2026-07-27T12:00:00")]  # exactly +14d
+        metrics = collect_order_metrics(
+            _buckets(issued=issued),
+            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+        )
+        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 1
 
 
 class TestPushMetrics:

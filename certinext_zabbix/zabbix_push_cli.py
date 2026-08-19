@@ -10,8 +10,9 @@ the matching items and triggers (source:
 Designed for two schedules on the same host:
 
 - a frequent run (no flags) pushing the cheap domain-list metrics;
-- a daily run with ``--expiry-days N`` that additionally fetches per-domain
-  details and pushes the DCV-expiry metrics.
+- a daily run with ``--expiry-days N`` and/or ``--order-health`` that
+  additionally fetches per-domain details (expiry) or the whole Orders
+  Report (order health) and pushes those metrics.
 
 Item keys are parameterized by environment (``[prod]`` / ``[sandbox]``),
 derived from the resolved CertiNext connection — a ``--sandbox`` (or
@@ -36,6 +37,7 @@ import os
 import socket
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
 import httpx
@@ -71,10 +73,19 @@ from .zabbix_push import (
     ENV_SANDBOX,
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
+    KEY_ORDERS_DAYS_SINCE_ISSUED,
+    KEY_ORDERS_EXPIRING,
+    KEY_ORDERS_FAILED_RECENT,
+    KEY_ORDERS_UNDOWNLOADED,
+    KEY_ORDERS_UNISSUED,
     KEY_UNVERIFIED,
     DomainScope,
+    OrderBuckets,
+    bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
+    collect_order_metrics,
+    fetch_orders,
     item_key,
     push_metrics,
     refresh_domain,
@@ -127,6 +138,51 @@ def run(
             "every 15 minutes. Disabled by default."
         ),
     )] = None,
+    # Order health check
+    order_health: Annotated[bool, typer.Option(
+        "--order-health", envvar="CERTINEXT_ORDER_HEALTH",
+        help=(
+            "Also push order-health metrics: orders awaiting issuance, "
+            "certificates generated but never downloaded, orders that "
+            "recently failed, days since the last certificate was issued, "
+            "and certificates expiring within a lead time. Fetches the "
+            "whole orders report (paginated) — schedule on a daily run, "
+            "not every 15 minutes. Disabled by default."
+        ),
+    )] = False,
+    order_failing_lookback_days: Annotated[int, typer.Option(
+        "--order-failing-lookback-days", metavar="DAYS",
+        envvar="CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS",
+        help=(
+            "Only count failed orders from the last DAYS days toward the "
+            "failed-recent metric — older history is normal, not something "
+            "to alert on forever."
+        ),
+    )] = 30,
+    order_history_days: Annotated[int, typer.Option(
+        "--order-history-days", metavar="DAYS",
+        envvar="CERTINEXT_ORDER_HISTORY_DAYS",
+        help=(
+            "Bound the orders-report fetch to the last DAYS days, so it "
+            "does not grow without limit as order history accumulates. "
+            "Must stay comfortably longer than the longest certificate "
+            "lifetime in the account: an issued cert older than this "
+            "window drops out of the expiring-soon metric. Public TLS "
+            "certificates cap at 398 days, so the 3-year default has ample "
+            "margin; raise it only if the account holds longer-lived certs."
+        ),
+    )] = 1095,
+    order_cert_expiry_days: Annotated[int, typer.Option(
+        "--order-cert-expiry-days", metavar="DAYS",
+        envvar="CERTINEXT_ORDER_CERT_EXPIRY_DAYS",
+        help=(
+            "An issued order's certificate counts toward the expiring-soon "
+            "metric when its certificate_expiry_date falls within DAYS "
+            "days (already-expired included) — same lead-time semantics "
+            "as --expiry-days, but for the certificate itself rather than "
+            "DCV verification."
+        ),
+    )] = 30,
     # Zabbix destination
     zabbix_server: Annotated[str, typer.Option(
         "--zabbix-server", metavar="HOST", envvar="ZABBIX_SERVER",
@@ -153,7 +209,11 @@ def run(
 
     Always pushes the domain-list metrics (total domains, unverified count);
     with --expiry-days also fetches per-domain details and pushes the
-    DCV-expiry metrics (expiring count, minimum days left). The matching
+    DCV-expiry metrics (expiring count, minimum days left); with
+    --order-health also fetches the orders report and pushes the
+    order-health metrics (awaiting-issuance count, generated-but-never-
+    downloaded count, failed-recent count, days since last issued, and
+    certificates expiring within --order-cert-expiry-days). The matching
     trapper items live on `CertiNext DCV by Zabbix trapper` in Zabbix.
     """
     correlation_id = str(uuid.uuid4())
@@ -198,7 +258,11 @@ def run(
         if dry_run:
             log.info("DRY RUN — nothing will be sent to Zabbix")
 
-        job = "expiry" if expiry_days is not None else "plain"
+        # order_health shares the "expiry" job/lock tier — both are
+        # daily-cadence checks meant to run together on the same timer, and
+        # a third lock tier would only add a new way for two daily runs to
+        # collide (see TestLockScoping's 2026-07-15 incident regression).
+        job = "expiry" if (expiry_days is not None or order_health) else "plain"
         lock = run_lock(f"certinext_zabbix_push_{env}_{job}")
         try:
             lock.acquire()
@@ -216,6 +280,12 @@ def run(
             )
             if expiry_days is not None:
                 log.info("Expiry check enabled", days=expiry_days)
+            if order_health:
+                log.info(
+                    "Order-health check enabled",
+                    failing_lookback_days=order_failing_lookback_days,
+                    cert_expiry_days=order_cert_expiry_days,
+                )
 
         sess = build_session(
             conn, account_number=account_number, client_secret=client_secret,
@@ -267,6 +337,53 @@ def run(
                     "Collected expiry metrics", days=expiry_days,
                     expiring=metrics[item_key(KEY_EXPIRING, env)],
                     min_days_left=metrics.get(item_key(KEY_MIN_DAYS_LEFT, env)),
+                )
+
+        if order_health:
+            log.info("Fetching orders report for order-health check")
+            order_fetch_failed = False
+            buckets = OrderBuckets(
+                unissued=[], undownloaded=[], failed=[], issued=[], cancelled=[],
+            )
+            try:
+                # One unfiltered fetch, bucketed client-side. The vendor's
+                # server-side status filter can't be used: 5 of its 6
+                # pending-* values return HTTP 422 (issue #3). Bounded only
+                # by the multi-year history horizon — see the flag's help
+                # for why that's safe for every metric derived here.
+                history_since = (
+                    datetime.now(timezone.utc) - timedelta(days=order_history_days)
+                ).date()
+                buckets = bucket_orders(fetch_orders(sess.orders, since=history_since))
+            except (CertiNextAPIError, httpx.HTTPError) as exc:
+                # Same skip-rather-than-undercount policy as the expiry
+                # check above: a partial fetch would misreport pending/
+                # failed counts, which masks the very condition monitored.
+                log_caught_exception(
+                    log, "Failed to fetch orders report", exc, level="warning",
+                )
+                order_fetch_failed = True
+            except Exception as exc:
+                log_caught_exception(
+                    log, "Failed to fetch orders report — unexpected error", exc,
+                )
+                order_fetch_failed = True
+            if order_fetch_failed:
+                had_errors = True
+                log.error("Skipping order-health metrics — orders report fetch failed")
+            else:
+                metrics.update(collect_order_metrics(
+                    buckets, env,
+                    failing_lookback_days=order_failing_lookback_days,
+                    cert_expiry_days=order_cert_expiry_days,
+                ))
+                log.info(
+                    "Collected order-health metrics",
+                    unissued=metrics[item_key(KEY_ORDERS_UNISSUED, env)],
+                    undownloaded=metrics[item_key(KEY_ORDERS_UNDOWNLOADED, env)],
+                    failed_recent=metrics[item_key(KEY_ORDERS_FAILED_RECENT, env)],
+                    expiring=metrics[item_key(KEY_ORDERS_EXPIRING, env)],
+                    days_since_issued=metrics.get(item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, env)),
                 )
 
         if dry_run:
