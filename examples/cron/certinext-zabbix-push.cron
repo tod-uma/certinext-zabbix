@@ -17,5 +17,6 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 # CERTINEXT_DOMAIN_SCOPE=top   # top (default) / ns-boundary / all
 # CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS=30   # only used with --order-health below
 
-*/15 * * * *  certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
-12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 --order-health 2>>/var/log/certinext-zabbix/push.log
+0 */6 * * *   certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
+7 * * * *     certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --order-health 2>>/var/log/certinext-zabbix/push.log
+12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 2>>/var/log/certinext-zabbix/push.log

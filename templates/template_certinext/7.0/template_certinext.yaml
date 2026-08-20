@@ -242,7 +242,8 @@ zabbix_export:
         - tag: env
           value: prod
         # ------------------------------------------------ order health ---
-        # Orders Report metrics (--order-health on the daily pusher run).
+        # Orders Report metrics (--order-health on its own hourly pusher run,
+        # separate from --expiry-days — sysadmin/certinext-zabbix#8).
         # Deliberately does not use certificate_status (a vendor free-text
         # display string) for classification. The pusher fetches the report
         # unfiltered — the vendor's server-side status filter rejects 5 of
@@ -290,12 +291,12 @@ zabbix_export:
         - tag: env
           value: prod
       - uuid: 8d293822e167437e9d51288da3303c24
-        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[prod],{$CERTINEXT.NODATA.DAILY})=1'
-        name: 'CertiNext prod: no data from pusher (daily order-health run)'
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[prod],{$CERTINEXT.NODATA.ORDER_HEALTH})=1'
+        name: 'CertiNext prod: no data from pusher (hourly order-health run)'
         priority: WARNING
         description: |
-          No value received for {$CERTINEXT.NODATA.DAILY} — the
-          --order-health daily timer is dead, erroring before the send, or
+          No value received for {$CERTINEXT.NODATA.ORDER_HEALTH} — the
+          --order-health hourly timer is dead, erroring before the send, or
           the CertiNext API has been down across several runs. Check the
           timer and its journal on the sending host.
         tags:
@@ -634,15 +635,15 @@ zabbix_export:
         - tag: env
           value: sandbox
       - uuid: a6e206d90e194da09133c5dde105b233
-        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[sandbox],{$CERTINEXT.NODATA.DAILY})=1'
-        name: 'CertiNext sandbox: no data from pusher (daily order-health run)'
+        expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.orders.unissued[sandbox],{$CERTINEXT.NODATA.ORDER_HEALTH})=1'
+        name: 'CertiNext sandbox: no data from pusher (hourly order-health run)'
         status: DISABLED
         priority: WARNING
         description: |
-          No sandbox value received for {$CERTINEXT.NODATA.DAILY}. Ships
-          DISABLED because nodata() fires even for items that have never
-          received data — enable this trigger once a sandbox
-          --order-health daily run is actually scheduled.
+          No sandbox value received for {$CERTINEXT.NODATA.ORDER_HEALTH}.
+          Ships DISABLED because nodata() fires even for items that have
+          never received data — enable this trigger once a sandbox
+          --order-health hourly run is actually scheduled.
         tags:
         - tag: env
           value: sandbox
@@ -755,9 +756,12 @@ zabbix_export:
     - macro: '{$CERTINEXT.NODATA.FAST}'
       value: 13h
       description: 'nodata() window for the frequent items — one missed 6-hour run tolerated, two alert'
+    - macro: '{$CERTINEXT.NODATA.ORDER_HEALTH}'
+      value: 3h
+      description: 'nodata() window for the hourly order-health items — one missed hourly run tolerated, two alert'
     - macro: '{$CERTINEXT.ORDER.STUCK_AGE}'
       value: 24h
-      description: 'How long an order may sit awaiting issuance (accepted, no certificate generated) before the "stuck" trigger fires'
+      description: 'How long an order may sit awaiting issuance (accepted, no certificate generated) before the "stuck" trigger fires. The min() trigger requires every sample in this window to be nonzero, so it assumes --order-health pushes at least hourly (see NODATA.ORDER_HEALTH) — at the old daily cadence the window held only one sample and the guard silently degraded to last()>0 (sysadmin/certinext-zabbix#8)'
     - macro: '{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}'
       value: 7d
       description: 'How long a generated certificate may sit undownloaded before its trigger fires. Longer than STUCK_AGE: a manual portal order can legitimately wait for someone to collect it, whereas an ACME order should download within seconds'

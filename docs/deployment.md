@@ -145,8 +145,8 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 |---|---|
 | `--dry-run` | Compute and print the metrics without sending anything to Zabbix. Use for validation. |
 | `--domain-scope {top,ns-boundary,all}` | Which domains to monitor — applies to all four metrics, not just expiry. `top` (default) excludes any domain with a registered ancestor in the account (no DNS lookups). `ns-boundary` does the same but re-includes a domain with its own NS records (a real DNS zone cut). `all` restores the pre-`--domain-scope` unfiltered behavior. Switching away from `all` causes a one-time drop in `certinext.domains.total` — expected, not a fault. |
-| `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call per verified domain — schedule this on a daily run, not every 15 minutes). Disabled by default. |
-| `--order-health` | Also push the order-health metrics: orders awaiting issuance, certificates generated but never downloaded, orders that recently failed, and days since the last certificate was issued (one Orders Report fetch, paginated — schedule this on a daily run, not every 15 minutes). Disabled by default. |
+| `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call **per verified domain** — a real prod run of this loop took 3m25s; schedule this on its own daily run, not more often). Disabled by default. |
+| `--order-health` | Also push the order-health metrics: orders awaiting issuance, certificates generated but never downloaded, orders that recently failed, and days since the last certificate was issued (one Orders Report fetch, paginated — 2 pages at current order volume, cheap). Schedule this **hourly**, on its own timer, separate from `--expiry-days` — the `unissued`/`undownloaded` "stuck" triggers use a `min()` window that needs multiple samples inside it to actually guard against a single noisy snapshot; at a daily cadence the window only ever held one sample and silently degraded to a plain threshold check (see [sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)). Disabled by default. |
 | `--order-failing-lookback-days DAYS` | Only count failed orders from the last `DAYS` days toward the failed-recent metric. Default `30`. |
 | `--order-history-days DAYS` | Bound the orders-report fetch to the last `DAYS` days so it does not grow without limit as order history accumulates. Must stay comfortably longer than the longest certificate lifetime in the account — an issued cert older than this window drops out of `certinext.orders.expiring`. Public TLS certificates cap at 398 days, so the `1095` (3-year) default has ample margin. |
 | `--zabbix-server` / `--zabbix-port` / `--zabbix-host` / `--zabbix-timeout` | Override the matching environment variables above. |
@@ -206,7 +206,8 @@ Both order-stuck triggers compare against zero:
 
 An account that accumulated abandoned orders while people were still
 learning the CertiNext workflow will hold both counts permanently above
-zero, so both triggers fire on the first daily run and never clear. A
+zero, so both triggers fire on the first `--order-health` run and never
+clear. A
 full-report production measurement on 2026-08-07 (all 163 rows, not a
 sample) showed **24** orders awaiting issuance — median age 63 days, 18
 of them older than 30 days — and **13** certificates generated but never
@@ -219,26 +220,40 @@ cancel the generated-but-uncollected certificates. Run
 counts without sending anything; the goal is a steady-state of zero (or a
 small number that clears on its own within the macro window).
 
-## Two schedules
+## Three schedules
 
 | Run | Cadence | Command | Pushes |
 |---|---|---|---|
-| frequent | every 15 min | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
-| daily | once a day | `certinext-zabbix-push --expiry-days 14 --order-health` | additionally `certinext.dcv.expiring`, `certinext.dcv.min_days_left` (one detail call **per verified domain**) and `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch) — never schedule either check frequently |
+| frequent | every 6 hours | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
+| order-health | hourly | `certinext-zabbix-push --order-health` | `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch, 2 pages at current order volume) |
+| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.min_days_left` (one detail call **per verified domain** — the expensive one; a real prod run took 3m25s) |
 
 Pick an `--expiry-days` lead time that sits comfortably inside your own
 DCV-renewal automation's lead time, so this monitor firing means renewal
 has already been silently failing for a while — a real alert, not noise.
-`--expiry-days` and `--order-health` are independent flags — combine them
-on the same daily invocation (as above) or run them separately; they
-share the same "expiry" job lock tier either way, so a collision between
-them just makes the loser exit 0 rather than skipping a whole cycle.
+
+`--expiry-days` and `--order-health` are independent flags, and — unlike
+before — **deliberately scheduled on separate timers at different
+cadences**, not combined on one invocation. `--expiry-days` stays daily
+because it is genuinely expensive (a per-domain call). `--order-health`
+moved to hourly because it is cheap (a couple of paginated calls) *and*
+because the `unissued`/`undownloaded` "stuck" triggers wrap their metric
+in a `min()` window that only works as a real sustain guard when the
+window holds more than one sample; at the old shared daily cadence it
+held exactly one, and silently behaved like a plain threshold check
+instead — see [sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8).
+If you still run them together for some reason, they share the same lock
+tier, so a collision just makes the loser exit 0 rather than skipping a
+whole cycle — but there's no longer a reason to combine them.
 
 ## systemd units (recommended over cron)
 
-Two timer/service pairs: a frequent plain run, and a daily run that also
-checks DCV expiry. If they ever overlap, the built-in per-job lock makes
-the loser exit 0 — harmless. Example unit files are in
+Three timer/service pairs: a frequent plain run, an hourly order-health
+run, and a daily expiry run. Each has its own lock tier, so any overlap
+between *different* pairs just makes the loser exit 0 — harmless; see
+[sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)
+for why order-health needed its own tier rather than continuing to share
+one with expiry. Example unit files are in
 [examples/systemd/](../examples/systemd/); copy and adjust the `User=`,
 `EnvironmentFile=`, and `ExecStart=` paths to match your install.
 
@@ -263,18 +278,39 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/tmp
 # WARNING: do NOT set PrivateTmp=yes. The single-instance lock lives in
-# /tmp and must be visible to BOTH service units below; PrivateTmp would
-# give each unit its own /tmp and defeat the lock.
+# /tmp and must be visible to every certinext-zabbix-push* unit;
+# PrivateTmp would give each unit its own /tmp and defeat the lock.
 ```
 
 ```ini
 # /etc/systemd/system/certinext-zabbix-push.timer
 [Unit]
-Description=Run certinext-zabbix-push every 15 minutes
+Description=Run certinext-zabbix-push every 6 hours
 
 [Timer]
-OnCalendar=*:00/15
+OnCalendar=00/6:00:00
 RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```ini
+# /etc/systemd/system/certinext-zabbix-push-order-health.service
+# Identical to certinext-zabbix-push.service except:
+#   Description=Push CertiNext order-health metrics to Zabbix (hourly)
+#   ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --order-health
+```
+
+```ini
+# /etc/systemd/system/certinext-zabbix-push-order-health.timer
+[Unit]
+Description=Hourly certinext-zabbix-push run with order-health metrics
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
 Persistent=true
 
 [Install]
@@ -284,8 +320,8 @@ WantedBy=timers.target
 ```ini
 # /etc/systemd/system/certinext-zabbix-push-expiry.service
 # Identical to certinext-zabbix-push.service except:
-#   Description=Push CertiNext DCV expiry and order-health metrics to Zabbix (daily)
-#   ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 --order-health
+#   Description=Push CertiNext DCV expiry metrics to Zabbix (daily)
+#   ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14
 ```
 
 ```ini
@@ -306,7 +342,7 @@ Enable:
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now certinext-zabbix-push.timer certinext-zabbix-push-expiry.timer
+systemctl enable --now certinext-zabbix-push.timer certinext-zabbix-push-order-health.timer certinext-zabbix-push-expiry.timer
 ```
 
 Logs land in the journal as logfmt (`key=value`) lines; every line of one run shares a
@@ -371,8 +407,9 @@ CERTINEXT_CLIENT_SECRET=<client secret>
 ZABBIX_SERVER=<your zabbix server address>
 ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 
-*/15 * * * *  certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
-12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 --order-health 2>>/var/log/certinext-zabbix/push.log
+0 */6 * * *   certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push 2>>/var/log/certinext-zabbix/push.log
+7 * * * *     certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --order-health 2>>/var/log/certinext-zabbix/push.log
+12 3 * * *    certinextzbx  /opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14 2>>/var/log/certinext-zabbix/push.log
 ```
 
 With cron you own the log plumbing: create `/var/log/certinext-zabbix/`
@@ -393,10 +430,24 @@ your Windows environment, before using it in production.
 ## Nodata windows and cadence
 
 The `nodata()` trigger windows in the template assume roughly these
-cadences (frequent: alert after 1h of silence via
-`{$CERTINEXT.NODATA.FAST}`; daily — both the expiry and order-health
-items: after 26h via `{$CERTINEXT.NODATA.DAILY}`). If you change a
-timer's cadence materially, adjust the matching macro on the Zabbix side.
+cadences: frequent (domain-list) — alert after one missed 6-hour run is
+tolerated, a second alerts, via `{$CERTINEXT.NODATA.FAST}` (13h);
+order-health — alert after one missed hourly run is tolerated, a second
+alerts, via `{$CERTINEXT.NODATA.ORDER_HEALTH}` (3h); daily (expiry) —
+one missed daily run alerts, via `{$CERTINEXT.NODATA.DAILY}` (26h). If
+you change a timer's cadence materially, adjust the matching macro on the
+Zabbix side.
+
+`{$CERTINEXT.ORDER.STUCK_AGE}`'s `min()` trigger additionally assumes
+`--order-health` pushes **more often than once per STUCK_AGE window**
+(hourly, by default) — the window needs several samples inside it to
+actually require sustained badness rather than degrading to a single
+snapshot check. See
+[sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)
+for the incident this was found from, and don't move `--order-health`
+back onto a daily timer without either widening `STUCK_AGE` to match or
+accepting that the guard is a no-op again.
+
 The DCV-expiry severity tiers are likewise macros
 (`{$CERTINEXT.DCV.WARN_DAYS}`, `AVG_DAYS`, `HIGH_DAYS`, `DISASTER_DAYS`)
 — tune them in Zabbix, no re-import needed; they are independent of the
@@ -420,14 +471,18 @@ Zabbix host and no template change**:
    `/etc/certinext-zabbix/certinext-zabbix-sandbox.env` (mode 0600,
    root-owned) with `CERTINEXT_CLIENT_ID`/`CERTINEXT_CLIENT_SECRET` — the
    sandbox account's values.
-2. Timer/service pairs mirroring the prod ones, with
+2. Timer/service pairs mirroring the prod ones (frequent, hourly
+   order-health, daily expiry — same three-way split), with
    `EnvironmentFile=/etc/certinext-zabbix/certinext-zabbix-sandbox.env`
    and `ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --sandbox`
-   (add `--expiry-days 14 --order-health` on the daily one). Offset the
-   timers from the prod ones; the locks are per environment, so overlap
-   is harmless but staggering avoids hitting CertiNext simultaneously.
+   (add `--order-health` on the hourly one, `--expiry-days 14` on the
+   daily one — kept apart for the same reason as prod, see
+   [#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)).
+   Offset the timers from the prod ones; the locks are per environment, so
+   overlap is harmless but staggering avoids hitting CertiNext
+   simultaneously.
 3. Enable the three disabled `CertiNext sandbox: no data from pusher`
-   triggers on the template.
+   triggers on the template (frequent, hourly order-health, daily expiry).
 
 Sandbox runs push into the `[sandbox]` items automatically (the pusher
 derives the key parameter from its connection). With the `env:sandbox`
@@ -437,7 +492,9 @@ in the UI but never notify.
 ## Validation
 
 ```bash
-# 1. Metrics computed correctly, nothing sent
+# 1. Metrics computed correctly, nothing sent — combining both flags here is
+#    just a convenient one-off check; the scheduled deployment above runs
+#    them on separate timers (see the "Three schedules" section)
 sudo -u certinextzbx bash -c 'set -a; . /etc/certinext-zabbix/certinext-zabbix.env; set +a; \
   exec /opt/certinext-zabbix/bin/certinext-zabbix-push --dry-run --expiry-days 14 --order-health -v'
 

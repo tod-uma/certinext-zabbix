@@ -67,10 +67,11 @@ wanted.
    certinext-zabbix-push --zabbix-server your.zabbix.example --dry-run -v
    ```
 
-   Drop `--dry-run` once the metrics look right. Add `--expiry-days 14` and/
-   or `--order-health` on a daily schedule to also push DCV-expiry and
-   order-health metrics (see [docs/deployment.md](docs/deployment.md) for
-   the two-schedule systemd and cron setups, or
+   Drop `--dry-run` once the metrics look right. Add `--expiry-days 14` on
+   its own daily schedule to also push DCV-expiry metrics, and
+   `--order-health` on its own hourly schedule to also push order-health
+   metrics (see [docs/deployment.md](docs/deployment.md) for the
+   three-schedule systemd and cron setups, or
    [examples/windows/](examples/windows/) for Task Scheduler — **untested,
    review before production use**).
 

@@ -7,7 +7,7 @@
 ## Context
 
 `certinext.orders.days_since_issued[<env>]` (added alongside the other
-order-health metrics) is pushed by the daily `--order-health` run but
+order-health metrics) is pushed by the hourly `--order-health` run but
 ships with **no trigger** — see the item's description in
 `templates/template_certinext/7.0/template_certinext.yaml`. It reports
 days since the most recent order with an "issued" certificate status, by

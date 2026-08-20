@@ -14,8 +14,9 @@
     cron's inline KEY=VALUE lines, so this script fills that gap: it reads
     a KEY=VALUE env file into the current process's environment, then
     invokes certinext-zabbix-push.exe with any extra arguments passed
-    through (e.g. -PushArgs '--expiry-days','14','--order-health' for the
-    daily run).
+    through (e.g. -PushArgs '--order-health' for the hourly run, or
+    -PushArgs '--expiry-days','14' for the daily run — kept on separate
+    runs, see sysadmin/certinext-zabbix#8).
 
     Exits with the pusher's own exit code (0 ok, 1 errors, 130
     interrupted) so Task Scheduler's "Last Run Result" reflects it.
@@ -29,7 +30,8 @@
 
 .PARAMETER PushArgs
     Extra arguments forwarded to certinext-zabbix-push.exe, e.g.
-    @('--expiry-days', '14', '--order-health') for the daily run.
+    @('--order-health') for the hourly run, or @('--expiry-days', '14')
+    for the daily run.
 #>
 [CmdletBinding()]
 param(

@@ -527,8 +527,12 @@ class TestOrderHealthPath:
         )
         mock_log.exception.assert_not_called()
 
-    def test_uses_expiry_lock_tier_not_a_third_lock(self) -> None:
-        held = run_lock("certinext_zabbix_push_prod_expiry")
+    def test_uses_its_own_lock_tier_not_expiry(self) -> None:
+        """order-health moved off the shared "expiry" tier onto its own —
+        sysadmin/certinext-zabbix#8 — once it moved from the daily timer
+        onto its own hourly one. See TestLockScoping for the full coverage
+        of both tiers' independence."""
+        held = run_lock("certinext_zabbix_push_prod_order_health")
         held.acquire()
         try:
             result, mocks = _run(argv=["--order-health"])
@@ -621,7 +625,10 @@ class TestLockScoping:
     """Regression coverage for the prod incident (2026-07-15) where the daily
     --expiry-days run and the 15-minute plain run shared one lock and one
     silently skipped the other whenever their schedules landed on the same
-    quarter-hour."""
+    quarter-hour. Extended for sysadmin/certinext-zabbix#8: --order-health
+    moved off the shared "expiry" tier onto its own, once it moved from the
+    daily timer onto its own hourly one — the same collision class, one tier
+    pair later."""
 
     def test_plain_lock_does_not_block_expiry_run(self) -> None:
         held = run_lock("certinext_zabbix_push_prod_plain")
@@ -648,6 +655,46 @@ class TestLockScoping:
         held.acquire()
         try:
             result, mocks = _run()
+        finally:
+            held.release(force=True)
+        assert result.exit_code == 0
+        mocks.push.assert_not_called()
+
+    def test_expiry_lock_does_not_block_order_health_run(self) -> None:
+        held = run_lock("certinext_zabbix_push_prod_expiry")
+        held.acquire()
+        try:
+            result, mocks = _run(argv=["--order-health"])
+        finally:
+            held.release(force=True)
+        assert result.exit_code == 0
+        mocks.push.assert_called_once()
+
+    def test_order_health_lock_does_not_block_expiry_run(self) -> None:
+        held = run_lock("certinext_zabbix_push_prod_order_health")
+        held.acquire()
+        try:
+            result, mocks = _run(argv=["--expiry-days", "14"])
+        finally:
+            held.release(force=True)
+        assert result.exit_code == 0
+        mocks.push.assert_called_once()
+
+    def test_order_health_lock_still_collides_with_itself(self) -> None:
+        held = run_lock("certinext_zabbix_push_prod_order_health")
+        held.acquire()
+        try:
+            result, mocks = _run(argv=["--order-health"])
+        finally:
+            held.release(force=True)
+        assert result.exit_code == 0
+        mocks.push.assert_not_called()
+
+    def test_combined_invocation_takes_order_health_tier(self) -> None:
+        held = run_lock("certinext_zabbix_push_prod_order_health")
+        held.acquire()
+        try:
+            result, mocks = _run(argv=["--expiry-days", "14", "--order-health"])
         finally:
             held.release(force=True)
         assert result.exit_code == 0

@@ -134,8 +134,8 @@ def run(
         help=(
             "Also push the DCV-expiry metrics: verified domains whose DCV expires "
             "within DAYS days, and the minimum days left. Fetches domain details "
-            "(one API call per verified domain) — schedule on a daily run, not "
-            "every 15 minutes. Disabled by default."
+            "(one API call per verified domain, expensive) — schedule on its own "
+            "daily run, not more often. Disabled by default."
         ),
     )] = None,
     # Order health check
@@ -146,8 +146,10 @@ def run(
             "certificates generated but never downloaded, orders that "
             "recently failed, days since the last certificate was issued, "
             "and certificates expiring within a lead time. Fetches the "
-            "whole orders report (paginated) — schedule on a daily run, "
-            "not every 15 minutes. Disabled by default."
+            "whole orders report (paginated, cheap) — schedule on its own "
+            "hourly run, on a separate timer from --expiry-days: the "
+            "order-stuck triggers' sustain window needs several samples "
+            "inside it to work as intended. Disabled by default."
         ),
     )] = False,
     order_failing_lookback_days: Annotated[int, typer.Option(
@@ -258,11 +260,15 @@ def run(
         if dry_run:
             log.info("DRY RUN — nothing will be sent to Zabbix")
 
-        # order_health shares the "expiry" job/lock tier — both are
-        # daily-cadence checks meant to run together on the same timer, and
-        # a third lock tier would only add a new way for two daily runs to
-        # collide (see TestLockScoping's 2026-07-15 incident regression).
-        job = "expiry" if (expiry_days is not None or order_health) else "plain"
+        # order_health has its own lock tier, separate from expiry_days:
+        # they now run on independent schedules (order-health hourly,
+        # expiry-days daily — sysadmin/certinext-zabbix#8), so sharing a
+        # tier would reintroduce the same silent-skip-on-collision bug the
+        # 2026-07-15 incident fixed for plain-vs-expiry (see
+        # TestLockScoping). A combined invocation (both flags at once)
+        # takes the order_health tier, so it still can't double-push
+        # order-health metrics alongside a standalone hourly run.
+        job = "order_health" if order_health else ("expiry" if expiry_days is not None else "plain")
         lock = run_lock(f"certinext_zabbix_push_{env}_{job}")
         try:
             lock.acquire()
