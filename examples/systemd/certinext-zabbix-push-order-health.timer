@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly certinext-zabbix-push run with order-health metrics
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

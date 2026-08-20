@@ -2,9 +2,9 @@
 #Requires -Modules ScheduledTasks
 <#
 .SYNOPSIS
-    Registers the two certinext-zabbix-push Scheduled Tasks (frequent +
-    daily expiry), the Windows equivalent of the systemd timer pairs or
-    cron lines in ../systemd/ and ../cron/.
+    Registers the three certinext-zabbix-push Scheduled Tasks (frequent,
+    hourly order-health, daily expiry), the Windows equivalent of the
+    systemd timer pairs or cron lines in ../systemd/ and ../cron/.
 
 .NOTES
     UNTESTED. Written as a starting reference, not run against a real
@@ -14,11 +14,17 @@
 
 .DESCRIPTION
     Creates/updates:
-      - "CertiNext Zabbix Push"          — every 15 minutes, indefinitely
-      - "CertiNext Zabbix Push - Expiry" — once daily, with --expiry-days 14 --order-health
+      - "CertiNext Zabbix Push"              — every 6 hours, indefinitely
+      - "CertiNext Zabbix Push - OrderHealth" — hourly, with --order-health
+      - "CertiNext Zabbix Push - Expiry"      — once daily, with --expiry-days 14
 
-    Both tasks run Invoke-CertinextZabbixPush.ps1 (in this directory),
-    which loads the env file and calls certinext-zabbix-push.exe. Both
+    order-health runs on its own hourly task, separate from the daily
+    expiry task: the order-stuck triggers' min() sustain window needs
+    several samples inside it to work as intended, which a shared daily
+    cadence can't provide — see sysadmin/certinext-zabbix#8.
+
+    All three tasks run Invoke-CertinextZabbixPush.ps1 (in this directory),
+    which loads the env file and calls certinext-zabbix-push.exe. All
     MUST run as the same service account so their file locks
     (%TEMP%\certinext_zabbix_push_<env>_<job>.lock, one per job) land in
     the same temp directory — this is the Windows analogue of the
@@ -118,18 +124,25 @@ function Register-PushTask {
     }
 }
 
-# Frequent run: every 15 minutes, indefinitely, starting in one minute.
+# Frequent run: every 6 hours, indefinitely, starting in one minute.
 $frequentTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration ([TimeSpan]::MaxValue)
 Register-PushTask -TaskName "CertiNext Zabbix Push" `
     -Description "Push CertiNext DCV health metrics to Zabbix (frequent)" `
     -Trigger $frequentTrigger -PushArgs @()
 
-# Daily expiry + order-health run.
+# Hourly order-health run — its own timer, separate from expiry (see #8).
+$orderHealthTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration ([TimeSpan]::MaxValue)
+Register-PushTask -TaskName "CertiNext Zabbix Push - OrderHealth" `
+    -Description "Push CertiNext order-health metrics to Zabbix (hourly)" `
+    -Trigger $orderHealthTrigger -PushArgs @("--order-health")
+
+# Daily expiry run.
 $dailyTrigger = New-ScheduledTaskTrigger -Daily -At "03:12"
 Register-PushTask -TaskName "CertiNext Zabbix Push - Expiry" `
-    -Description "Push CertiNext DCV expiry and order-health metrics to Zabbix (daily)" `
-    -Trigger $dailyTrigger -PushArgs @("--expiry-days", "14", "--order-health")
+    -Description "Push CertiNext DCV expiry metrics to Zabbix (daily)" `
+    -Trigger $dailyTrigger -PushArgs @("--expiry-days", "14")
 
-Write-Host "Registered 'CertiNext Zabbix Push' and 'CertiNext Zabbix Push - Expiry' as $ServiceAccount."
+Write-Host "Registered 'CertiNext Zabbix Push', 'CertiNext Zabbix Push - OrderHealth', and 'CertiNext Zabbix Push - Expiry' as $ServiceAccount."
 Write-Host "Verify with: Get-ScheduledTaskInfo -TaskName 'CertiNext Zabbix Push'"

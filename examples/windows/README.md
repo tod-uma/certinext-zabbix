@@ -76,9 +76,12 @@ Run elevated (Administrator):
 
 Creates:
 
-- **CertiNext Zabbix Push** — every 15 minutes, indefinitely.
+- **CertiNext Zabbix Push** — every 6 hours, indefinitely.
+- **CertiNext Zabbix Push - OrderHealth** — hourly, with `--order-health`
+  (its own timer, separate from Expiry — see
+  [sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)).
 - **CertiNext Zabbix Push - Expiry** — daily at 03:12, with
-  `--expiry-days 14 --order-health`.
+  `--expiry-days 14`.
 
 Re-run the script to update an existing registration; it unregisters
 before re-registering.

@@ -1,5 +1,5 @@
 [Unit]
-Description=Push CertiNext DCV expiry metrics to Zabbix (daily)
+Description=Push CertiNext order-health metrics to Zabbix (hourly)
 Documentation=https://github.com/tod-uma/certinext-zabbix
 Wants=network-online.target
 After=network-online.target
@@ -9,7 +9,7 @@ Type=oneshot
 User=certinextzbx
 Group=certinextzbx
 EnvironmentFile=/etc/certinext-zabbix/certinext-zabbix.env
-ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --expiry-days 14
+ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --order-health
 # SIGTERM mid-run exits 130 after cleanup; treat an operator stop as success.
 SuccessExitStatus=130
 NoNewPrivileges=yes
@@ -19,7 +19,10 @@ ReadWritePaths=/tmp /var/log/certinext-zabbix
 # WARNING: do NOT set PrivateTmp=yes. The single-instance lock lives in
 # /tmp and must be visible to every certinext-zabbix-push* unit;
 # PrivateTmp would give each unit its own /tmp and defeat the lock.
-# order-health moved to its own hourly timer (certinext-zabbix-push-order-health.*)
-# — see sysadmin/certinext-zabbix#8. This unit no longer passes --order-health.
 # /var/log/certinext-zabbix is only needed if CERTINEXT_ZABBIX_DEBUG_LOG
 # is set in the EnvironmentFile (see certinext-zabbix-push.env.example).
+# On its own timer (not bundled with --expiry-days): the Orders Report
+# fetch is cheap (one paginated call, two pages at current order volume)
+# and needs to run far more often than the per-domain expiry check for
+# the STUCK_AGE trigger's min() window to hold more than one sample —
+# see sysadmin/certinext-zabbix#8.
