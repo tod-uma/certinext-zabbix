@@ -24,3 +24,4 @@ an ADR (see [../adr/](../adr/)).
 | [IDEA-003](IDEA-003-days-since-issued-alert-threshold.md) | Add a severity trigger for days-since-last-issued once there's a baseline cadence | Proposed |
 | [IDEA-004](IDEA-004-stuck-order-domain-visibility-lld.md) | Per-domain visibility into stuck orders via Zabbix LLD | Proposed |
 | [IDEA-005](IDEA-005-originator-alert-severity-bucketing.md) | Bucket order-health alert severity by `originator` (ACME vs. manual) | Proposed |
+| [IDEA-006](IDEA-006-enforce-ruff-format.md) | Run `ruff format` and enforce it in CI | Proposed |
