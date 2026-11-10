@@ -7,20 +7,24 @@ item values; ``CertiNext DCV by Zabbix trapper`` on the Zabbix side owns
 the matching items and triggers (source:
 ``templates/template_certinext/7.0/template_certinext.yaml``).
 
-Designed for two schedules on the same host:
+Designed for three schedules on the same host:
 
 - a frequent run (no flags) pushing the cheap domain-list metrics;
-- a daily run with ``--expiry-days N`` and/or ``--order-health`` that
-  additionally fetches per-domain details (expiry) or the whole Orders
-  Report (order health) and pushes those metrics.
+- a daily run with ``--expiry-days N`` that additionally fetches
+  per-domain details and pushes the DCV-expiry metrics;
+- an hourly run with ``--order-health`` that fetches the whole Orders
+  Report and pushes the order-health metrics.
+
+``--validated-by CA`` (env ``CERTINEXT_VALIDATED_BY``) restricts the
+domain and DCV-expiry metrics to one CA's domain records (ADR 0011).
 
 Item keys are parameterized by environment (``[prod]`` / ``[sandbox]``),
 derived from the resolved CertiNext connection — a ``--sandbox`` (or
 sandbox-profile) run pushes into the sandbox items of the same Zabbix
 host, never the prod ones. Locks are per environment *and* per job (plain
-vs. ``--expiry-days``), so optional sandbox schedules never make prod runs
-skip a cycle, and the daily expiry run colliding with a 15-minute plain-push
-slot can't make either one skip the other.
+vs. ``--expiry-days`` vs. ``--order-health``), so optional sandbox
+schedules never make prod runs skip a cycle, and one job's run colliding
+with another's slot can't make either one skip the other.
 
 On success the pushed metrics are printed to stdout as one JSON object
 (stderr carries the logs, as usual).
@@ -128,6 +132,18 @@ def run(
             "from 'all' causes a one-time drop in certinext.domains.total, expected."
         ),
     )] = DomainScope.TOP,
+    validated_by: Annotated[Optional[str], typer.Option(
+        "--validated-by", metavar="CA", envvar="CERTINEXT_VALIDATED_BY",
+        help=(
+            "Only monitor domain records validated by this CA, e.g. SSLCOM or "
+            "EMSIGN (case-insensitive). An organization holds one record per CA "
+            "per name, so without this every CA's records are counted together. "
+            "Affects the domain and DCV-expiry metrics only, not order health. "
+            "Unset or empty (the default) monitors every CA, the old behavior. "
+            "Item keys are unchanged: switching CA changes what the [env] items "
+            "measure, so expect a step change in their values."
+        ),
+    )] = None,
     # Expiry check
     expiry_days: Annotated[Optional[int], typer.Option(
         "--expiry-days", metavar="DAYS",
@@ -254,7 +270,13 @@ def run(
         # which [env]-parameterized items receive the values — derived, not
         # user-supplied, so sandbox data can never land in the prod items.
         env = ENV_SANDBOX if conn.sandbox else ENV_PROD
-        structlog.contextvars.bind_contextvars(env=env)
+        # An empty value (e.g. a templated unit file leaving
+        # CERTINEXT_VALIDATED_BY="") means unset, not "a CA named ''" —
+        # the latter would filter out every record and trip the
+        # empty-list trigger. Bound on every line so each push says
+        # which CA it measured ("ALL" = unfiltered).
+        ca_filter = (validated_by or "").strip().upper() or None
+        structlog.contextvars.bind_contextvars(env=env, validated_by=ca_filter or "ALL")
         if conn.sandbox:
             log.warning("SANDBOX MODE — metrics reflect the CertiNext sandbox, not production")
         if dry_run:
@@ -297,7 +319,15 @@ def run(
             conn, account_number=account_number, client_secret=client_secret,
         )
 
-        domains = sess.domain.get_list()
+        # Filter by CA *before* scope_domains: its covering-ancestor check
+        # is org-scoped but not CA-aware, so on a mixed list an SSL.com
+        # child would count as covered by an emSign apex record (ADR 0011).
+        # No kwarg when unset keeps the pre-flag call shape exactly.
+        domains = (
+            sess.domain.get_list(validated_by=ca_filter)
+            if ca_filter is not None
+            else sess.domain.get_list()
+        )
         scoped_domains = scope_domains(domains, domain_scope)
         log.info(
             "Domain scope applied",

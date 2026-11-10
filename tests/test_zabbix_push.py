@@ -50,6 +50,7 @@ def _domain(
     status: str = "ACTIVE",
     dcv_status: str = "VERIFIED",
     valid_till: str | None = None,
+    validated_by: str | None = None,
 ) -> Domain:
     """Build a detached Domain from wire-format fields.
 
@@ -59,6 +60,8 @@ def _domain(
         dcv_status: DCV status (``VERIFIED``, ``PENDING``, ``REJECTED``).
         valid_till: ISO timestamp for the ``validTill`` field, or None to
             omit it (as the list endpoint does).
+        validated_by: Wire ``validatedBy`` (e.g. ``"SSLCOM"``), or None to
+            omit it — the library then reads the record as emSign.
 
     Returns:
         A Domain usable for field access only (no API client attached).
@@ -68,6 +71,8 @@ def _domain(
     }
     if valid_till is not None:
         payload["validTill"] = valid_till
+    if validated_by is not None:
+        payload["validatedBy"] = validated_by
     return Domain.from_payload(None, payload)
 
 
@@ -622,6 +627,28 @@ class TestScopeDomains:
         with patch("certinext.models.domains._has_ns_records", return_value=False):
             result = scope_domains([apex, plain_sub], DomainScope.NS_BOUNDARY)
         assert result == [apex]
+
+    def test_ca_filtered_list_keeps_child_of_other_ca_apex(self) -> None:
+        # ADR 0011: the CLI filters by CA before scoping. The SSL.com child's
+        # only registered ancestor is an emSign record, so in the SSL.com-only
+        # list it has no covering ancestor and must be kept.
+        emsign_apex = _domain("example.edu")
+        sslcom_child = _domain("dept.example.edu", validated_by="SSLCOM")
+        sslcom_only = [d for d in (emsign_apex, sslcom_child) if d.ca == "SSLCOM"]
+        assert scope_domains(sslcom_only, DomainScope.TOP) == [sslcom_child]
+
+    def test_mixed_ca_list_hides_child_behind_other_ca_apex(self) -> None:
+        # The hazard the filter-first ordering avoids: coverage is org-scoped
+        # but not CA-aware, so an unfiltered mixed list drops the SSL.com child
+        # as "covered" by the emSign apex.
+        emsign_apex = _domain("example.edu")
+        sslcom_child = _domain("dept.example.edu", validated_by="SSLCOM")
+        assert scope_domains([emsign_apex, sslcom_child], DomainScope.TOP) == [emsign_apex]
+
+    def test_ca_filtered_list_still_scopes_same_ca_subdomain(self) -> None:
+        apex = _domain("example.edu", validated_by="SSLCOM")
+        sub = _domain("dept.example.edu", validated_by="SSLCOM")
+        assert scope_domains([apex, sub], DomainScope.TOP) == [apex]
 
 
 class TestRefreshDomain:

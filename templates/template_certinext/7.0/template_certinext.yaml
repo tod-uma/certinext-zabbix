@@ -29,13 +29,17 @@ zabbix_export:
 
       All items are trappers — nothing is polled. Items are duplicated
       per environment via key parameters ([prod] / [sandbox]); the pusher
-      picks the parameter from its CertiNext connection. Two schedules
-      feed each environment: a frequent run (domain totals) and a daily
-      run with --expiry-days and/or --order-health (DCV expiry and order
-      health). nodata() triggers catch a dead pusher. DCV expiry alerts
-      escalate through a severity gradient on min_days_left (WARNING 14d
-      → AVERAGE 7d → HIGH 1d → DISASTER lapsed, thresholds in the
-      {$CERTINEXT.DCV.*_DAYS} macros), dependency-chained so only the
+      picks the parameter from its CertiNext connection. Three schedules
+      feed each environment: a frequent run (domain totals), a daily run
+      with --expiry-days (DCV expiry) and an hourly run with
+      --order-health (order health). With --validated-by CA the domain
+      and DCV-expiry items measure only that CA's domain records (one
+      record per CA per name exists during a CA migration); unset, every
+      CA is counted together. nodata() triggers catch a dead pusher. DCV expiry alerts
+      escalate through a severity gradient on min_days_left (WARNING 3d
+      → AVERAGE 2d → HIGH 1d → DISASTER lapsed, thresholds in the
+      {$CERTINEXT.DCV.*_DAYS} macros, sized for SSL.com's ~10-day
+      self-renewing DCV window), dependency-chained so only the
       most severe tier fires. Order-health alerts on orders stuck awaiting
       issuance past {$CERTINEXT.ORDER.STUCK_AGE}, certificates generated
       but left undownloaded past {$CERTINEXT.ORDER.UNDOWNLOADED_AGE}, and
@@ -60,13 +64,14 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Total domains returned by the CertiNext domain list, after
-        --domain-scope filtering (default: top-level only — see
-        --domain-scope in the pusher's --help). Guards against a
-        silently empty list (vendor pagination/search bugs) —
-        unverified=0 alone would look healthy in that failure mode.
-        Upgrading to a --domain-scope other than "all" causes a
-        one-time drop in this graph — expected, not data loss.
+        Total domain records returned by the CertiNext domain list,
+        after --validated-by (one CA, if set) and --domain-scope
+        filtering (default: top-level only — see the pusher's --help).
+        Guards against a silently empty list (vendor pagination/search
+        bugs) — unverified=0 alone would look healthy in that failure
+        mode. Upgrading to a --domain-scope other than "all", or setting
+        or changing --validated-by, causes a one-time step in this
+        graph — expected, not data loss.
       tags:
       - tag: env
         value: prod
@@ -78,8 +83,10 @@ zabbix_export:
         description: |
           The pusher ran but the CertiNext API returned zero domains.
           Almost certainly an API-side regression (auth, pagination,
-          search), not a real empty account. Check the pusher logs on
-          the sending host, then `certinext healthcheck`.
+          search), not a real empty account — unless the pusher runs
+          with --validated-by naming a CA the account holds no records
+          for (check validated_by= in its log lines). Check the pusher
+          logs on the sending host, then `certinext healthcheck`.
         tags:
         - tag: env
           value: prod
@@ -91,11 +98,11 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Domains that are ACTIVE but not DCV-VERIFIED (PENDING or
-        REJECTED), after --domain-scope filtering (default: top-level
-        only). Nonzero is normal briefly while a new domain's DCV
-        challenge propagates through DNS; sustained nonzero means a
-        domain is stuck.
+        Domain records that are ACTIVE but not DCV-VERIFIED (PENDING or
+        REJECTED), after --validated-by (one CA, if set) and
+        --domain-scope filtering (default: top-level only). Nonzero is
+        normal briefly while a new domain's DCV challenge propagates
+        through DNS; sustained nonzero means a domain is stuck.
       tags:
       - tag: env
         value: prod
@@ -444,10 +451,12 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Total domains returned by the CertiNext sandbox domain list,
-        after --domain-scope filtering (default: top-level only).
-        Upgrading to a --domain-scope other than "all" causes a
-        one-time drop in this graph — expected, not data loss.
+        Total domain records returned by the CertiNext sandbox domain
+        list, after --validated-by (one CA, if set) and --domain-scope
+        filtering (default: top-level only). Upgrading to a
+        --domain-scope other than "all", or setting or changing
+        --validated-by, causes a one-time step in this graph —
+        expected, not data loss.
       tags:
       - tag: env
         value: sandbox
@@ -459,7 +468,8 @@ zabbix_export:
         description: |
           The sandbox pusher ran but the CertiNext sandbox API
           returned zero domains — likely an API-side regression (auth,
-          pagination, search), not a real empty account.
+          pagination, search), not a real empty account, unless
+          --validated-by names a CA the account holds no records for.
         tags:
         - tag: env
           value: sandbox
@@ -471,8 +481,9 @@ zabbix_export:
       history: 90d
       allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
       description: |
-        Sandbox domains that are ACTIVE but not DCV-VERIFIED, after
-        --domain-scope filtering (default: top-level only). Expect
+        Sandbox domain records that are ACTIVE but not DCV-VERIFIED,
+        after --validated-by (one CA, if set) and --domain-scope
+        filtering (default: top-level only). Expect
         this to be nonzero during deliberate sandbox testing.
       tags:
       - tag: env
@@ -739,7 +750,7 @@ zabbix_export:
         value: sandbox
     macros:
     - macro: '{$CERTINEXT.DCV.AVG_DAYS}'
-      value: '7'
+      value: '2'
       description: 'AVERAGE severity when the soonest DCV expiry is within this many days'
     - macro: '{$CERTINEXT.DCV.DISASTER_DAYS}'
       value: '0'
@@ -748,8 +759,8 @@ zabbix_export:
       value: '1'
       description: 'HIGH severity when the soonest DCV expiry is within this many days'
     - macro: '{$CERTINEXT.DCV.WARN_DAYS}'
-      value: '14'
-      description: 'WARNING severity when the soonest DCV expiry is within this many days'
+      value: '3'
+      description: 'WARNING severity when the soonest DCV expiry is within this many days. Sized for SSL.com dns-persist (a ~10-day window that renews itself): alert only when a record gets close to lapsing without having rolled forward. Raise it for a CA with long DCV windows (e.g. emSign, ~1 year)'
     - macro: '{$CERTINEXT.NODATA.DAILY}'
       value: 26h
       description: 'nodata() window for the daily expiry items — one missed daily run alerts'
