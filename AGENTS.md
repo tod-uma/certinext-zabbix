@@ -38,24 +38,26 @@ that no fixture predicts. `--dry-run` computes and prints every metric
 and sends nothing to Zabbix:
 
 ```bash
-uv run certinext-zabbix-push --order-health --dry-run \
+uv run --extra keyring certinext-zabbix-push --order-health --dry-run \
     --zabbix-server 127.0.0.1 --zabbix-host dry-run.invalid   # prod
-uv run certinext-zabbix-push --profile sandbox --order-health --dry-run \
+uv run --extra keyring certinext-zabbix-push --profile sandbox \
+    --order-health --dry-run \
     --zabbix-server 127.0.0.1 --zabbix-host dry-run.invalid   # sandbox
 ```
 
 Two things trip this up:
 
-- **`keyring` is required and is not a dependency of this repo.** Client
+- **`keyring` is required and lives in this repo's `keyring` extra.** Client
   secrets live in the OS keyring, not in
   `certinext`'s `config.toml` (that file holds only non-secret defaults
   like `org_id`). Without it, `certinext`'s credential lookup falls
   through to an interactive prompt and dies with a bare
   `EOFError: EOF when reading a line` — which looks like a broken CLI
-  rather than a missing optional package. Install it with
-  `uv pip install keyring` (it is `certinext`'s `keyring` extra), and
-  omit `--profile` for prod; the profiles in `config.toml` are all
-  sandbox.
+  rather than a missing optional package. Pass `--extra keyring` to
+  `uv run` as above, not a one-off `uv pip install keyring`: a later
+  bare `uv run` re-syncs the venv to the manifest and strips an
+  ad-hoc install again. Omit `--profile` for prod; the profiles in
+  `config.toml` are all sandbox.
 - **`--zabbix-server` is required even under `--dry-run`**, which never
   opens a socket to Zabbix. Pass any placeholder.
 
