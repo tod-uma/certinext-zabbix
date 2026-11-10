@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
+import structlog
 from certinext.cli_support import TRACEBACK_HINT, LogFormat, LogMode
 from certinext.orders import OrderRecord
 from typer.testing import CliRunner
@@ -619,6 +620,43 @@ class TestDomainScope:
         mock_sleep.assert_called_once_with(5.0)
         (metrics,) = mocks.push.call_args.args
         assert "certinext.dcv.expiring[prod]" in metrics
+
+
+class TestValidatedBy:
+    """--validated-by / CERTINEXT_VALIDATED_BY must reach get_list (ADR 0011)."""
+
+    def test_unset_passes_no_kwarg(self) -> None:
+        result, mocks = _run()
+        assert result.exit_code == 0
+        mocks.sess.domain.get_list.assert_called_once_with()
+
+    def test_flag_forwarded_uppercased(self) -> None:
+        result, mocks = _run(argv=["--validated-by", "sslcom"])
+        assert result.exit_code == 0
+        mocks.sess.domain.get_list.assert_called_once_with(validated_by="SSLCOM")
+
+    def test_envvar_forwarded(self) -> None:
+        _, mocks = _run(env={"CERTINEXT_VALIDATED_BY": "EMSIGN"})
+        mocks.sess.domain.get_list.assert_called_once_with(validated_by="EMSIGN")
+
+    def test_empty_envvar_means_unset(self) -> None:
+        # A templated unit file may leave the variable blank; filtering on
+        # "" would drop every record and trip the empty-list trigger.
+        _, mocks = _run(env={"CERTINEXT_VALIDATED_BY": "  "})
+        mocks.sess.domain.get_list.assert_called_once_with()
+
+    def test_ca_bound_into_log_context(self) -> None:
+        _run(argv=["--validated-by", "SSLCOM"])
+        assert structlog.contextvars.get_contextvars()["validated_by"] == "SSLCOM"
+
+    def test_unset_logs_all(self) -> None:
+        _run()
+        assert structlog.contextvars.get_contextvars()["validated_by"] == "ALL"
+
+    def test_order_health_unaffected(self) -> None:
+        # Orders aren't segmented by CA; the flag must not leak into them.
+        _, mocks = _run(argv=["--validated-by", "SSLCOM", "--order-health"])
+        assert "validated_by" not in mocks.sess.orders.get_list.call_args.kwargs
 
 
 class TestLockScoping:

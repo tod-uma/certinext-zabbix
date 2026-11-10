@@ -50,14 +50,14 @@ so a single Zabbix host can monitor both without collision.
 | Macro | Default | Meaning |
 |---|---|---|
 | `{$CERTINEXT.SENDER.ALLOWED}` | `127.0.0.1` | **Must override.** Source IP(s) of the host(s) running `certinext-zabbix-push`. Trapper items reject any other sender. |
-| `{$CERTINEXT.DCV.WARN_DAYS}` | `14` | WARNING severity when the soonest DCV expiry is within this many days. |
-| `{$CERTINEXT.DCV.AVG_DAYS}` | `7` | AVERAGE severity threshold (days). |
+| `{$CERTINEXT.DCV.WARN_DAYS}` | `3` | WARNING severity when the soonest DCV expiry is within this many days. Sized for SSL.com dns-persist, whose DCV window is about 10 days and renews itself, so the tiers fire only when a record nears lapsing without rolling forward. For a CA with long DCV windows (emSign's were about a year), raise `WARN_DAYS`/`AVG_DAYS` (the old defaults were `14`/`7`). |
+| `{$CERTINEXT.DCV.AVG_DAYS}` | `2` | AVERAGE severity threshold (days). |
 | `{$CERTINEXT.DCV.HIGH_DAYS}` | `1` | HIGH severity threshold (days). |
 | `{$CERTINEXT.DCV.DISASTER_DAYS}` | `0` | DISASTER severity — DCV already lapsed. |
 | `{$CERTINEXT.NODATA.FAST}` | `13h` | `nodata()` window for the frequent (domain-list) items — one missed 6-hour run tolerated, two alert. |
 | `{$CERTINEXT.NODATA.ORDER_HEALTH}` | `3h` | `nodata()` window for the hourly order-health items — one missed hourly run tolerated, two alert. |
 | `{$CERTINEXT.NODATA.DAILY}` | `26h` | `nodata()` window for the daily expiry items — one missed daily run alerts. |
-| `{$CERTINEXT.UNVERIFIED.MAX_AGE}` | `1h` | How long a domain may stay unverified before the "stuck" trigger fires. |
+| `{$CERTINEXT.UNVERIFIED.MAX_AGE}` | `7h` | How long a domain may stay unverified before the "stuck" trigger fires — just over one 6-hour frequent-run cycle. |
 | `{$CERTINEXT.ORDER.STUCK_AGE}` | `24h` | How long an order may sit awaiting issuance (accepted, no certificate generated) before the "stuck" trigger fires. |
 | `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}` | `7d` | How long a generated certificate may sit undownloaded before its trigger fires. Longer than `STUCK_AGE`: a manual portal order can legitimately wait for collection, an ACME order should download within seconds. |
 
@@ -67,8 +67,8 @@ Each exists twice — `[prod]` and `[sandbox]` — via the Zabbix key parameter.
 
 | Key | Type | Description |
 |---|---|---|
-| `certinext.domains.total[<env>]` | Unsigned | Total domains returned by the CertiNext domain list, after `--domain-scope` filtering. |
-| `certinext.domains.unverified[<env>]` | Unsigned | Domains that are ACTIVE but not DCV-VERIFIED (PENDING/REJECTED), after `--domain-scope` filtering. |
+| `certinext.domains.total[<env>]` | Unsigned | Total domain records returned by the CertiNext domain list, after `--validated-by` and `--domain-scope` filtering. |
+| `certinext.domains.unverified[<env>]` | Unsigned | Domain records that are ACTIVE but not DCV-VERIFIED (PENDING/REJECTED), after `--validated-by` and `--domain-scope` filtering. |
 | `certinext.dcv.expiring[<env>]` | Unsigned | Verified domains in scope whose DCV expires within the pusher's `--expiry-days` lead time. |
 | `certinext.dcv.min_days_left[<env>]` | Float (days) | Days until the soonest DCV expiry across all verified domains in scope; negative once lapsed. |
 | `certinext.orders.unissued[<env>]` | Unsigned | Orders the CA has accepted but not yet generated a certificate for — still working through approval, DCV, CSR, documents, or the agreement. |
@@ -107,6 +107,17 @@ domain that has its own NS records (a real DNS zone cut). `all` restores
 the pre-`--domain-scope` unfiltered behavior. Switching away from `all`
 causes a one-time drop in `certinext.domains.total` the first time it
 ships — expected, not a monitoring fault.
+
+**`--validated-by CA` picks one CA's domain records.** CertiNext keeps one
+record per CA per name (e.g. an emSign and an SSL.com record for the same
+apex), and by default the pusher counts them all together. Set
+`--validated-by SSLCOM` (env `CERTINEXT_VALIDATED_BY`) to measure only the
+SSL.com records. It gates the four domain/DCV metrics, not the order-health
+ones, and runs before `--domain-scope`, so subdomain coverage is judged
+within one CA. Item keys don't change, so switching CA is a step change in
+the existing items' history. Don't set it until the account actually holds
+records for that CA, or `domains.total` reads 0 and the empty-list trigger
+fires. See [ADR 0011](../../../docs/adr/0011-dcv-metrics-single-ca-by-flag.md).
 
 ## Triggers
 
