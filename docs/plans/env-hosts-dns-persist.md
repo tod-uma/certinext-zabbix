@@ -101,7 +101,10 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
       been six / three since the hourly order-health timer, #8).
     - The README screenshot is captioned as a 0.1.x view, not retaken (needs a live 0.2.0 host).
     - IDEA-007 coordinating issue: #11 (opened 2026-11-18).
-  - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
+  - [x] ends by packaging R2 and handing it over, 2026-11-18. **Tod chose the sysadmin-ansible workspace as
+    the R2 reviewer** (see *R2* below): brief posted as a comment on Ansible/tower-projects#4 (local copy
+    `review/REVIEW-BRIEF-ansible-R2.md`), pinned at `e8802f9` (pipeline for `2380008` green; `e8802f9` adds only
+    the IDEA-007 issue link). Findings come back as a reply on #4; Tod then prompts session 3R here.
 - [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
   doing the shipping, if Tod drops R2.
 - [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
@@ -294,6 +297,13 @@ working from this section alone.
   `ZABBIX_HOSTNAME` per-run setting); contradictions between the docs and the template; anything an operator
   with only these files could not do; ADR claims that the template doesn't bear out.
 - **Optional:** Tod decides at the end of session 3. Dropped → session 3 opens the MR and tags, and 3R doesn't happen.
+- **As run (2026-11-18, Tod's choice):** the reviewer is the **sysadmin-ansible workspace** (Claude Code on WSL),
+  the docs' real consumer, rather than an outside model. It works in three steps: report the deployed state from
+  tower-projects, critique the docs *before* drafting, then draft the tower-projects changes on a branch (no
+  run, no deploy) plus a session-4 walkthrough from the docs alone. **Known weakness:** it knows UMS, so it can
+  fill a doc gap from local knowledge without noticing; the brief makes it list every such fill, and session 3R
+  treats each as a finding. Not independent of this model family, so it does not replace session 4's live
+  evidence.
 
 ### Rules for both checkpoints
 
@@ -317,7 +327,7 @@ working from this section alone.
 |---|---|---|---|---|---|
 | R1 (agentic) | Codex coding agent (OpenAI); self-ID "GPT-6, exact model version unknown" | 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
 | R1 (paste-only) | Gemini web app, Gemini 3 Pro (per Tod; self-ID just "Gemini") | 2026-11-18 | `73bab0b` | `review/REVIEW-gemini-R1.pdf` (the `.md` is truncated mid-finding 2) | session 3 |
-| R2 | | | | | |
+| R2 | Claude Code, sysadmin-ansible workspace (WSL); model self-ID in its reply | 2026-11-18 | `e8802f9` | reply comment on Ansible/tower-projects#4 | session 3R |
 
 ## Steps
 
