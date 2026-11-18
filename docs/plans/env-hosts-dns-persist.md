@@ -7,7 +7,7 @@ implements-adr: [0013, 0014]   # both written in session 3; 0014 supersedes 0012
 # One Zabbix host per CertiNext environment + dns-persist TXT checks (0.2.0)
 
 Approved 2026-11-18. This in-repo copy **supersedes** the private draft the plan was written in; it is the
-only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaking: every item key changes).
+only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc1` (was `0.2.0a1` until session 3R; breaking: every item key changes).
 
 ## Status
 
