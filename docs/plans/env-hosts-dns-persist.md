@@ -107,6 +107,33 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
     the IDEA-007 issue link). Findings come back as a reply on #4; Tod then prompts session 3R here.
 - [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
   doing the shipping, if Tod drops R2.
+  - [x] R2 triaged and fixed, 2026-11-18. 15 findings plus 8 local-knowledge entries; every finding was checked against
+    source. F2's sub-claim was confirmed: all 9 `[prod]` item UUIDs and 12/16 trigger UUIDs match v0.1.0rc11's. So was
+    F3's: 4 triggers are new, among them days-since-issued. F10's help text was confirmed against certinext's
+    `setup_logging` (ConsoleRenderer).
+
+    | Finding | Verdict | Fix |
+    |---|---|---|
+    | F1 order-health fires mid-upgrade; CM can't be done inside an interval | real | prep section + stop/start all timers |
+    | F2 no way to tell in-place from restart | real | note the item ID before, check it after |
+    | F3 new alerts unlisted; DAYS_SINCE_ISSUED_MAX only in sandbox section | real (the macro hint was reachable by link, the list wasn't) | *New alerts after upgrading* table, prep step 5 |
+    | F4 SENDER.ALLOWED not named for the sandbox host | partly: the linked sandbox step 1 names it, but "copy sandbox-specific overrides" misled | step 5A names all three macros |
+    | F5 no source of truth for PERSIST.EXPECTED | real | DNS-PERSIST option's record value via `get-dcv`; per account (deployment + template README) |
+    | F6 classic agent unverified, and the failure is a wrong severity | real (README already said "verified on agent 2"; the consequence wasn't stated) | `agent.variant` + absent-name check in the template README |
+    | F7 no DNS egress pre-check | real | prep step 3 |
+    | F8 per-environment `CERTINEXT_VALIDATED_BY` unclear | real | flag table row |
+    | F9 0.1.x roles share one hostname | real | CM checklist assert |
+    | F10 env table says JSON-lines | real, wider than reported: help text, docstring and both example env files too | `d684a13`, plus the recovery grep (`level=error` never matched; found here, not by R2) |
+    | F11 3/2/1/0 overrides | stylistic, adopted | one sentence |
+    | F12 no expected DNS item count | real | `persist_apexes` × 3 |
+    | F13 fresh-hosts path unordered | real | **Tod: shared steps, then fork** (Path A keep host / Path B fresh hosts, ending in Unlink and clear) |
+    | F14 VALIDATED_BY missing from facts | real | facts list |
+    | F15 one pusher per environment | real | CM checklist paragraph |
+
+    Local knowledge: agent variant → F6; SENDER.ALLOWED override → F4/5A; shared hostname in the role → F9; open problems
+    vanish on clear → step 9; flaky local resolver → template README note. No doc change for the other three
+    (`ZABBIX_SERVER` direct to the server is covered by *Monitored by*; the shared env files with the dcv-update units and
+    the control-host clone are UMS-only).
 - [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
 - [ ] **Session 5 — observation** (Follow-ups; runs any time after 2026-11-20 ~13:41Z)
 
@@ -327,7 +354,7 @@ working from this section alone.
 |---|---|---|---|---|---|
 | R1 (agentic) | Codex coding agent (OpenAI); self-ID "GPT-6, exact model version unknown" | 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
 | R1 (paste-only) | Gemini web app, Gemini 3 Pro (per Tod; self-ID just "Gemini") | 2026-11-18 | `73bab0b` | `review/REVIEW-gemini-R1.pdf` (the `.md` is truncated mid-finding 2) | session 3 |
-| R2 | Claude Code, sysadmin-ansible workspace (WSL); model self-ID in its reply | 2026-11-18 | `e8802f9` | reply comment on Ansible/tower-projects#4 | session 3R |
+| R2 | Claude Code, sysadmin-ansible workspace (WSL): Claude Opus 5.5 for Steps 0–1 (F1–F12), Claude Haiku 5.5 for Steps 2–3 (F13–F15) | 2026-11-18 | `e8802f9` ✓ | reply comment on Ansible/tower-projects#4 (note 22127) | session 3R |
 
 ## Steps
 
@@ -419,22 +446,25 @@ Hand-written; new UUIDs via `uuid.uuid4().hex`.
 
 CI green → `/mr` → merge → release the 0.2.0 pre-release.
 
-**Tod's UMS cut-over (session 4)**, revised in session 3 to the in-place path (Tod's choice; follows
-`docs/deployment.md` *Upgrading from 0.1.x*, which is also what R2 would review):
+**Tod's UMS cut-over (session 4)**: **Path B, fresh hosts** (Tod, during R2, 2026-11-18; supersedes the in-place
+choice made in session 3). Follow `docs/deployment.md` *Upgrading from 0.1.x* as revised in session 3R. The
+sysadmin-ansible workspace's walkthrough on tower-projects#4 (note 22127, Step 3) is the UMS-specific version of it.
 
-1. Re-import the template over the existing one (*Update existing* + *Delete missing* for items, triggers,
-   discovery rules). Check *Latest data* on the current pusher host: do the bare-key items carry pre-upgrade
-   history? Record the answer here (it confirms or refutes the doc's "expected" claim).
-2. The current pusher host becomes the prod host: `ENV` stays at the `prod` default; it already has an agent
-   interface; set `PERSIST.EXPECTED` (the full value, unquoted). `SENDER.ALLOWED` and the 3/2/1/0 overrides
-   carry over.
-3. Create the sandbox logical host (pusher machine's agent IP, same proxy as today), macros `ENV=sandbox`,
-   `PERSIST.EXPECTED` (sandbox value), `SENDER.ALLOWED`, and a higher `ORDER.DAYS_SINCE_ISSUED_MAX`.
-4. tower-projects (ums.pki): new version, `ZABBIX_HOSTNAME` = the sandbox host on the sandbox units only.
-5. Drop any `-9999` DCV overrides.
+<details>
+<summary>Why fresh hosts</summary>
 
-The fresh-hosts path (two new logical hosts, unlink and clear the old template) remains the fallback if step 1
-shows the in-place rename misbehaving.
+- The current prod host is the pusher machine's own entry, which also carries its OS monitoring, so CertiNext data gets
+  hosts of its own: `CertiNext prod` / `CertiNext sandbox`, with the portal name in the visible name.
+- `domains.total` steps 43 → ~21 at the same moment (`CERTINEXT_VALIDATED_BY=SSLCOM`), so the old history is
+  worth little.
+- The template is still re-imported in place while the old host is linked, so session 4 still answers the
+  history question before *Unlink and clear*.
+</details>
+
+Also decided in R2: skip the rc11 deploy and go straight to 0.2.0 (ums-certinext-scripts 0.5.0rc1 rides along);
+`SSLCOM` on **both** environments. Draft Ansible branches (unmerged): `Ansible_Roles/ums.pki@feat/certinext-zabbix-0.2.0-env-hosts`
+and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeholder pins get the real versions after
+3R tags.
 
 ## Verification
 
