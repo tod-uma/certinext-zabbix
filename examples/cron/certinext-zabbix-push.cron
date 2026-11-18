@@ -13,6 +13,8 @@
 CERTINEXT_CLIENT_ID=<account number>
 CERTINEXT_CLIENT_SECRET=<client secret>
 ZABBIX_SERVER=<your zabbix server address>
+# One Zabbix host per CertiNext environment (ADR 0013): sandbox jobs go in
+# their own cron file, with the sandbox credentials and host name.
 ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 # CERTINEXT_DOMAIN_SCOPE=top   # top (default) / ns-boundary / all
 # CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS=30   # only used with --order-health below
