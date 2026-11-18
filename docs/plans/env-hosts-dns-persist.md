@@ -20,7 +20,38 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
   - [x] pusher tests (step 3, first two bullets): 120 passed locally; ruff, mypy, pyright clean
   - [ ] Verification 2 (live prod `--dry-run`): not run in session 1; Tod's call, can run any time before
     session 4
-- [ ] **Session 2 — template** (step 2, `tests/test_template.py`, IDEA-003 trigger)
+- [x] **Session 2 — template** (step 2, `tests/test_template.py`, IDEA-003 trigger), 2026-11-18
+  - [x] template rewritten single-environment (prod UUIDs kept, sandbox block deleted, 13 new UUIDs)
+  - [x] `tests/test_template.py`: 24 tests, mutation-checked (renamed key, dangling dependency, undeclared
+    macro each fail it); `pyyaml` + `types-PyYAML` added to the `dev` extra
+  - [x] IDEA-003: baseline measured, Tod chose **4** days; idea marked Accepted
+  - [x] 144 tests pass; ruff, mypy, pyright clean
+  - **As built — read before session 3** (these differ from or sharpen *Design*):
+    - **No freshness trigger on the discovery rule.** A trigger expression can't reference an LLD rule's key
+      (to be confirmed at import, Verification 3). It is redundant anyway: the pusher never sends expiry
+      metrics without discovery, so the existing `nodata()` on `dcv.expiring` (26h) fires whenever discovery is
+      stale. That trigger's description now says so.
+    - **"Lookup failing" covers all three lookups** (`nodata` on local `or` resolver 1 `or` resolver 2), not
+      just the local one: Verification 5's resolver-1 negative test needs it. `{$CERTINEXT.DNS.NODATA}` = 3h,
+      so it must stay above `DNS.INTERVAL.EXTERNAL`.
+    - **"Not visible publicly" is one trigger prototype** (`find(R1,#2)=0 or find(R2,#2)=0`), on the rule,
+      depending on "record missing".
+    - **`{$CERTINEXT.PERSIST.EXPECTED}` holds the value without its quotes**; the triggers add them. Triggers
+      use the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}` (unquoted context), which is what
+      Verification 5's per-apex override needs. *Step 5's "full quoted value" means the full value, unquoted.*
+    - **`{$CERTINEXT.ENV}` defaults to `prod`**, so prod-only installs need no macro; a sandbox host left at
+      the default raises the misroute HIGH on its first run.
+    - **`{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` = `4`**, a plain number (the item is in days; `4d` would
+      expand to seconds). The sandbox host will want an override (low issuance volume).
+    - The persist INFO trigger uses a literal `<=0`: it means "lapsed", not a tunable threshold.
+    - Days-left gradient moved to the top-level `triggers:` list (multi-item, gated on `token_domains>0`),
+      keeping its UUIDs. Template name unchanged (`CertiNext DCV by Zabbix trapper`), although it now has
+      agent prototypes too; renaming means editing every expression, so it wasn't done here. Raise it in session 3 if wanted.
+    - Item-prototype `type` is omitted (the default is the passive Zabbix agent). The preprocessing step is
+      `CHECK_NOT_SUPPORTED` with parameters `['1', '^Cannot perform DNS query']` and `error_handler:
+      CUSTOM_VALUE` with no params (empty string). The rule uses `lifetime: 3d` and
+      `enabled_lifetime_type: DISABLE_NEVER`. These export constants come from memory of the 7.0 schema and
+      have **not** been through an import yet: Verification 3 must confirm them.
 - [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
 - [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
 - [ ] **Session 5 — observation** (Follow-ups; runs any time after 2026-11-20 ~13:41Z)
