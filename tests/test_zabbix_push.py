@@ -29,6 +29,7 @@ from certinext_zabbix.zabbix_push import (
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_UNDOWNLOADED,
     KEY_ORDERS_UNISSUED,
+    KEY_PERSIST_APEXES,
     KEY_PERSIST_DISCOVERY,
     KEY_PERSIST_MIN_DAYS_LEFT,
     KEY_TOKEN_DOMAINS,
@@ -42,6 +43,7 @@ from certinext_zabbix.zabbix_push import (
     collect_order_metrics,
     fetch_dcv_methods,
     fetch_orders,
+    persist_apex_names,
     persist_discovery_value,
     push_metrics,
     refresh_domain,
@@ -101,6 +103,7 @@ class TestBareKeys:
         assert KEY_PERSIST_DISCOVERY == "certinext.dcv.persist.discovery"
         assert KEY_TOKEN_DOMAINS == "certinext.dcv.token_domains"
         assert KEY_PERSIST_MIN_DAYS_LEFT == "certinext.dcv.persist_min_days_left"
+        assert KEY_PERSIST_APEXES == "certinext.dcv.persist_apexes"
 
 
 class TestCollectDomainMetrics:
@@ -273,6 +276,13 @@ class TestPersistDiscoveryValue:
     def test_empty_is_an_empty_array(self) -> None:
         # [] is a complete answer ("no persist domains"), not a missing one.
         assert persist_discovery_value([]) == "[]"
+
+    def test_apex_names_match_discovery_rows(self) -> None:
+        # The apex-count metric is len() of these, so it must equal the rows.
+        persist = [_domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu")]
+        names = persist_apex_names(persist)
+        assert names == ["a.example.edu", "b.example.edu"]
+        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(persist))] == names
 
 
 def _order(

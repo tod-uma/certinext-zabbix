@@ -67,6 +67,7 @@ KEY_ENV = "certinext.env"
 KEY_PERSIST_DISCOVERY = "certinext.dcv.persist.discovery"
 KEY_TOKEN_DOMAINS = "certinext.dcv.token_domains"
 KEY_PERSIST_MIN_DAYS_LEFT = "certinext.dcv.persist_min_days_left"
+KEY_PERSIST_APEXES = "certinext.dcv.persist_apexes"
 
 ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
@@ -277,6 +278,25 @@ def _get_dcv_method(d: Domain, *, attempts: int, retry_delay: float) -> str:
     raise AssertionError("unreachable")  # pragma: no cover — loop always returns or raises
 
 
+def persist_apex_names(persist: Sequence[Domain]) -> list[str]:
+    """Return the distinct, sorted apex names the persist discovery is built from.
+
+    :func:`persist_discovery_value` and the :data:`KEY_PERSIST_APEXES` count
+    both come from this, so the count always equals the number of
+    discovery rows.
+
+    Args:
+        persist: Every DNS-PERSIST domain in scope
+            (:attr:`DcvMethodSplit.persist`).
+
+    Returns:
+        Sorted, de-duplicated domain names; nameless records are dropped.
+    """
+    # Domain.name is Optional in the model; a nameless record has no TXT
+    # name to look up, so it cannot become a discovery row.
+    return sorted({d.name for d in persist if d.name})
+
+
 def persist_discovery_value(persist: Sequence[Domain]) -> str:
     """Build the LLD JSON for :data:`KEY_PERSIST_DISCOVERY`.
 
@@ -294,10 +314,7 @@ def persist_discovery_value(persist: Sequence[Domain]) -> str:
         A JSON array, e.g. ``[{"{#APEX}": "example.edu"}]``; ``[]`` when there
         are none, which tells Zabbix the set is genuinely empty.
     """
-    # Domain.name is Optional in the model; a nameless record has no TXT
-    # name to look up, so it cannot become a discovery row.
-    names = sorted({d.name for d in persist if d.name})
-    return json.dumps([{"{#APEX}": name} for name in names])
+    return json.dumps([{"{#APEX}": name} for name in persist_apex_names(persist)])
 
 
 def verified_domains(domains: Sequence[Domain]) -> list[Domain]:

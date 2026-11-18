@@ -293,6 +293,19 @@ class TestStructure:
         assert used, "no LLD macros found in the persist rule"
         assert used <= set(row), f"LLD macros the pusher never sends: {used - set(row)}"
 
+    def test_apex_drop_window_outlasts_lifetime(self, template: dict[str, Any]) -> None:
+        """The count-drop trigger looks back further than the rule keeps lost apexes.
+
+        Otherwise a partial list that persists would resolve the problem
+        before Zabbix deletes the missing apexes' checks.
+        """
+        item = next(i for i in template["items"] if i["key"] == zabbix_push.KEY_PERSIST_APEXES)
+        (trig,) = item["triggers"]
+        window = re.search(r"max\(/[^,]+,(\d+)d\)", trig["expression"])
+        assert window, trig["expression"]
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        assert int(window.group(1)) > int(rule["lifetime"].removesuffix("d"))
+
     def test_persist_prototypes_check_three_resolvers(self, template: dict[str, Any]) -> None:
         """One local and two external TXT lookups per discovered apex."""
         rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)

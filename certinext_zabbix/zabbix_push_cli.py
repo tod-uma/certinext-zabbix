@@ -86,6 +86,7 @@ from .zabbix_push import (
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_UNDOWNLOADED,
     KEY_ORDERS_UNISSUED,
+    KEY_PERSIST_APEXES,
     KEY_PERSIST_DISCOVERY,
     KEY_PERSIST_MIN_DAYS_LEFT,
     KEY_TOKEN_DOMAINS,
@@ -99,6 +100,7 @@ from .zabbix_push import (
     collect_order_metrics,
     fetch_dcv_methods,
     fetch_orders,
+    persist_apex_names,
     persist_discovery_value,
     push_metrics,
     refresh_domain,
@@ -414,6 +416,11 @@ def run(
                 # The method split is complete, so the discovery list is
                 # too — send it even if a detail refresh fails below.
                 metrics[KEY_PERSIST_DISCOVERY] = persist_discovery_value(split.persist)
+                # Sent with the list, never without it: the template alerts
+                # when this drops below its recent maximum, which catches a
+                # silently partial domain list before Zabbix deletes the
+                # missing apexes' checks (and a deliberate removal, once).
+                metrics[KEY_PERSIST_APEXES] = len(persist_apex_names(split.persist))
                 token_verified = verified_domains(split.token)
                 persist_verified = verified_domains(split.persist)
                 log.info(

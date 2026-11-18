@@ -402,6 +402,7 @@ class TestExpiryPath:
         assert json.loads(metrics["certinext.dcv.persist.discovery"]) == [
             {"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"},
         ]
+        assert metrics["certinext.dcv.persist_apexes"] == 2
         # Only the token domain feeds the token metrics.
         assert metrics["certinext.dcv.token_domains"] == 1
         assert metrics["certinext.dcv.expiring"] == 1
@@ -429,6 +430,9 @@ class TestExpiryPath:
         assert result.exit_code == 1
         (metrics,) = mocks.push.call_args.args
         assert "certinext.dcv.persist.discovery" not in metrics
+        # The count rides with the list: alone, a short count would fire
+        # "apex count dropped" for a list Zabbix never received.
+        assert "certinext.dcv.persist_apexes" not in metrics
         assert "certinext.dcv.expiring" not in metrics
         assert "certinext.dcv.token_domains" not in metrics
         good.refresh.assert_not_called()

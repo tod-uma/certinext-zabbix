@@ -303,6 +303,46 @@ zabbix_export:
         tags:
         - tag: env
           value: '{$CERTINEXT.ENV}'
+    - uuid: e681c4ccc8394967a3b8f2c540d4f8e5
+      name: 'CertiNext {$CERTINEXT.ENV}: dns-persist apexes discovered'
+      type: TRAP
+      key: certinext.dcv.persist_apexes
+      delay: '0'
+      history: 90d
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        Number of apexes in the dns-persist discovery list, sent with the
+        list by the daily --expiry-days run (never without it). Carries the
+        "apex count dropped" trigger: an apex missing from the list is a
+        lost resource, and Zabbix deletes its TXT checks after the
+        discovery rule's 3-day lifetime.
+      tags:
+      - tag: env
+        value: '{$CERTINEXT.ENV}'
+      triggers:
+      - uuid: 9985a89f43e24072bad81568c8333453
+        expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_apexes)<max(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_apexes,4d)'
+        name: 'CertiNext {$CERTINEXT.ENV}: dns-persist apex count dropped'
+        opdata: 'now: {ITEM.LASTVALUE1}'
+        priority: WARNING
+        manual_close: 'YES'
+        description: |
+          Fewer apexes use dns-persist than at some point in the last 4
+          days. Either a domain was removed or moved off dns-persist on
+          purpose, or CertiNext returned a partial domain list. Find the
+          missing apex under the discovery rule's items: they are marked
+          as no longer discovered, and are deleted 3 days after they drop
+          out. If the removal was deliberate, close this problem; it
+          clears on its own once the 4-day window passes the old count.
+          If it wasn't, check the pusher's log and the CertiNext domain
+          list before the 3 days run out. The 4-day window is the rule's
+          3-day lifetime plus one daily run, so a partial list that
+          persists keeps this open until its checks are gone.
+        tags:
+        - tag: env
+          value: '{$CERTINEXT.ENV}'
+        - tag: scope
+          value: availability
         # ------------------------------------------------ order health ---
         # Orders Report metrics (--order-health on its own hourly pusher run,
         # separate from --expiry-days — sysadmin/certinext-zabbix#8).
