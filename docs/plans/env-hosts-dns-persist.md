@@ -52,6 +52,8 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
       CUSTOM_VALUE` with no params (empty string). The rule uses `lifetime: 3d` and
       `enabled_lifetime_type: DISABLE_NEVER`. These export constants come from memory of the 7.0 schema and
       have **not** been through an import yet: Verification 3 must confirm them.
+      **Corrected in session 3 (R1):** scope `'1'` was inverted (7.0 API: `0` = error matches, `1` = doesn't),
+      so it is now `'0'`, with an explicit `error_handler_params: ''`. See *Session 3*.
 - [x] **Session 2R — external review R1: package and hand over** (pusher + template + tests; see *External review
   checkpoints*). Packaging only: it ends when the bundle or brief is handed over. **Recommended.** 2026-11-18
   - [x] revision pinned: `73bab0b` (pipeline 56328 green), base `17809f4`
@@ -63,7 +65,29 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
     GitLab URL, already on the public mirror); Tod chose **both** reviewers (Codex + a paste-only one).
     Table rows filled at hand-off; the paste-only service and both products' self-IDs are confirmed in session 3
 - [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
-  - [ ] starts by processing R1's findings (fresh session; re-derive each against source)
+  - [x] starts by processing R1's findings (fresh session; re-derive each against source), 2026-11-18. Both
+    findings files name `73bab0b`. Re-derived against the [7.0 item object API][item-api] (preprocessing type
+    26, `error_handler_params`), the [7.0 template export schema][export-schema], the plan's recorded agent2
+    test, and the installed certinext 1.4.0rc5 `Domain.get_list()`:
+
+    | Finding | Verdict | Evidence / action |
+    | --- | --- | --- |
+    | Codex 1: scope `'1'` selects the opposite errors | **Real** | API: `0` = matches, `1` = doesn't match. A missing record stayed unsupported; a timeout raised "record missing". Fixed `41765c0` |
+    | Codex 2 / Gemini 1: `error_handler_params` missing | **Plausible, adopted** | API marks it required for a custom value; the schema lists no default. Explicit `''` costs nothing; Verification 3 settles it. `41765c0` |
+    | Codex 3 (risk): discovery only as complete as the domain list | **Real, narrowed** | `get_list()` raises on non-2xx, but a short page returned early ends paging silently. Tod chose detection: `certinext.dcv.persist_apexes` + "apex count dropped" (`last < max(4d)`, WARNING, manual close). `8a3c3c5` |
+    | Gemini 2: `CHECK_NOT_SUPPORTED` takes only a pattern, drop `'1'` | **Wrong** | API defines `<scope>\n<pattern>`; removing the scope would make the pattern the scope |
+    | Gemini 3 (risk): tests don't check LLD macros | **Real (test gap)** | New test: every `{#…}` under the rule is a column the pusher sends. The predicted runtime symptom is unverified. `5998084` |
+    | Gemini 4 (risk): agent may strip TXT quotes | **Wrong** | Recorded fact: agent2 7.0.31 on the pusher host returns `<name> TXT "<value>"`, quotes included. Verification 5 re-confirms |
+    | Gemini 5 (style): `enabled_lifetime_type` may be misnamed | **Wrong** | The 7.0 export schema lists `enabled_lifetime_type` with `DISABLE_NEVER` |
+
+    - Codex's extra notes, not findings: "record missing" and "lookup failing" can both be open (intended; they
+      have different causes); the stale `nodata()` window for freshly discovered items needs the live check in
+      Verification 3. Gemini's "unverified items" need no action.
+    - 148 tests pass (3 new template tests, 1 pusher test, 2 CLI assertions), each mutation-checked; ruff, mypy,
+      pyright clean. The three commits carry `External-review:` trailers.
+    - **For step 4 / ADR 0014:** document the apex-count item and trigger, and why its window is 4 days (the
+      rule's 3-day lifetime plus one daily run). It does not catch one apex removed and another added in the
+      same run.
   - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
 - [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
   doing the shipping, if Tod drops R2.
@@ -278,8 +302,8 @@ working from this section alone.
 
 | Checkpoint | Service / product | Date | Pinned SHA | Findings file | Processed in |
 |---|---|---|---|---|---|
-| R1 (agentic) | Codex CLI (OpenAI); model from the findings' self-ID | handed over 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
-| R1 (paste-only, optional) | Gemini or ChatGPT web app, Tod to record which | handed over 2026-11-18 | `73bab0b` | `review/REVIEW-<service>-R1.md` (Tod saves the download) | session 3 |
+| R1 (agentic) | Codex coding agent (OpenAI); self-ID "GPT-6, exact model version unknown" | 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
+| R1 (paste-only) | Gemini web app, Gemini 3 Pro (per Tod; self-ID just "Gemini") | 2026-11-18 | `73bab0b` | `review/REVIEW-gemini-R1.pdf` (the `.md` is truncated mid-finding 2) | session 3 |
 | R2 | | | | | |
 
 ## Steps
@@ -363,7 +387,7 @@ Hand-written; new UUIDs via `uuid.uuid4().hex`.
   - creating the two hosts (agent interface on the pusher machine, same proxy, host macros)
   - a per-run `ZABBIX_HOSTNAME` for the sandbox units in the systemd/cron/Windows examples
   - outbound DNS to the external resolvers
-  - the metrics table
+  - the metrics table (including `certinext.dcv.persist_apexes`, added in session 3)
   - **an upgrade section from 0.1.x** (re-import, relink, history restarts, macro moves)
 - `AGENTS.md` / `CLAUDE.md` key-sync note.
 - Wishlist **IDEA-007**: token-method record check while DCV is pending.
@@ -437,6 +461,8 @@ CI green → `/mr` → merge → release the 0.2.0 pre-release.
 - [Zabbix 7.0 item value preprocessing][preproc]
 - [Zabbix 7.0 macros supported by location][macros-loc]
 - [Zabbix 7.0 string functions (`find`)][fn-string] · [history functions (`nodata`)][fn-history]
+- [Zabbix 7.0 item object API (preprocessing parameters)][item-api] ·
+  [template export/import schema][export-schema]
 
 [dns-persist]: https://datatracker.ietf.org/doc/draft-ietf-acme-dns-persist/
 [agent-keys]: https://www.zabbix.com/documentation/7.0/en/manual/config/items/itemtypes/zabbix_agent
@@ -446,3 +472,5 @@ CI green → `/mr` → merge → release the 0.2.0 pre-release.
 [macros-loc]: https://www.zabbix.com/documentation/7.0/en/manual/appendix/macros/supported_by_location
 [fn-string]: https://www.zabbix.com/documentation/7.0/en/manual/appendix/functions/string
 [fn-history]: https://www.zabbix.com/documentation/7.0/en/manual/appendix/functions/history
+[item-api]: https://www.zabbix.com/documentation/7.0/en/manual/api/reference/item/object
+[export-schema]: https://www.zabbix.com/documentation/7.0/en/manual/xml_export_import/templates
