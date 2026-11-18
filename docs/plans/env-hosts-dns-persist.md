@@ -7,7 +7,7 @@ implements-adr: [0013, 0014]   # both written in session 3; 0014 supersedes 0012
 # One Zabbix host per CertiNext environment + dns-persist TXT checks (0.2.0)
 
 Approved 2026-11-18. This in-repo copy **supersedes** the private draft the plan was written in; it is the
-only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc1` (was `0.2.0a1` until session 3R; breaking: every item key changes).
+only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 released in session 3R; rc2 = session 4R trigger fix; breaking vs 0.1.x: every item key changes).
 
 ## Status
 
@@ -36,9 +36,10 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc1` (was `
       so it must stay above `DNS.INTERVAL.EXTERNAL`.
     - **"Not visible publicly" is one trigger prototype** (`find(R1,#2)=0 or find(R2,#2)=0`), on the rule,
       depending on "record missing".
-    - **`{$CERTINEXT.PERSIST.EXPECTED}` holds the value without its quotes**; the triggers add them. Triggers
-      use the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}` (unquoted context), which is what
-      Verification 5's per-apex override needs. *Step 5's "full quoted value" means the full value, unquoted.*
+    - **`{$CERTINEXT.PERSIST.EXPECTED}` holds the value without its quotes**; the triggers add them. ~~Triggers
+      use the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}` (unquoted context)~~ **Superseded in rc2**:
+      that form never worked live (see session 4R). Triggers use the plain macro. *Step 5's "full quoted value"
+      means the full value, unquoted.*
     - **`{$CERTINEXT.ENV}` defaults to `prod`**, so prod-only installs need no macro; a sandbox host left at
       the default raises the misroute HIGH on its first run.
     - **`{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` = `4`**, a plain number (the item is in days; `4d` would
@@ -134,7 +135,48 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc1` (was `
     vanish on clear → step 9; flaky local resolver → template README note. No doc change for the other three
     (`ZABBIX_SERVER` direct to the server is covered by *Monitored by*; the shared env files with the dcv-update units and
     the control-host clone are UMS-only).
-- [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
+- [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5). **Paused 2026-11-18 for
+  rc2** (sysadmin-ansible; results in Ansible/tower-projects#4 notes 22173 + 22174). Done: import (clean; the
+  7.0 export constants confirmed), history carried over (itemid kept, 2,590 rows), hosts `CertiNext prod` /
+  `CertiNext sandbox` created, the role run, all 6 units run (prod 21 apexes / 63 DNS items, sandbox 20 / 60).
+  Hosts in maintenance (data collection on). Still to do: step 13 (Unlink and clear the old host), Verification
+  4's "no persist triggers firing", Verification 5, step 17.
+- [ ] **Session 4R — rc2 trigger fix** (branch `fix/dns-persist-trigger-macro-context`, `0.2.0rc2`)
+  - [x] Bug: every apex raised "record missing" and "not visible publicly" within about 1 s of its first
+    lookup. Cause, live on 7.0: an unquoted macro context ends at the first `}`, so
+    `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}` parsed as context `{#APEX` plus a literal `}`. LLD left it
+    unsubstituted, the base macro expanded, and the stray `}` meant the pattern could never match.
+  - [x] Fix (Tod): plain `{$CERTINEXT.PERSIST.EXPECTED}`, **no per-apex override**; each persist `find(…,#N)`
+    gated on `count(…,#N)>=N` (F18: `find(…,#3)` fired on the first value).
+  - [x] Tests: `test_no_lld_macro_in_unquoted_macro_context`, `test_persist_find_gated_on_full_window`
+    (both fail against rc1's template); 150 pass.
+  - [x] Docs: ADR 0014, template README, deployment.md; F17's interim fix (the macro takes the full
+    `ssl.com; accounturi=…` string, not the API hostname) added next to the macro in the docs and the
+    template's macro description.
+  - [x] Live check, 2026-11-18 (working-tree template imported by Tod before the MR; expiry push run by
+    hand on both envs, so LLD rewrote the discovered triggers): expanded expression ends in the full quoted
+    value (no stray `}`); on the next local lookup (21:49Z) **all 41 "record missing" closed**; "lookup
+    failing" 0. "Not visible publicly" (41) still open then: hourly lookups, so it re-evaluates about an
+    hour after discovery. Confirm it closes before tagging.
+  - [ ] MR, merge, tag `v0.2.0rc2`; then session 4 resumes: re-import, check that no persist trigger fires
+    after a full window, then Verification 5.
+  - F19 (venv path): no doc change. The docs' `/opt/certinext-zabbix` is the generic install example; the
+    UMS role's `/opt/certinext` is UMS-specific.
+  - F17 proper (the pusher sends `{#PERSIST.EXPECTED}` from the CA's API): **not in rc2**. It needs an
+    unverified live check (whether a bare LLD macro inside a quoted `find()` parameter is substituted) and a
+    pusher change; tracked as a follow-up.
+
+  <details>
+  <summary>Why drop the context rather than quote it or adopt F17 now</summary>
+
+  - The plain macro is the only form with live evidence: session 4's `expandExpression` showed the base macro
+    expanding correctly inside the quoted `find()` pattern.
+  - The quoted-context form (`{$M:"{#APEX}"}`) would sit inside an already-quoted function parameter and need
+    escaped quotes, which is untested on 7.0.
+  - The value is per CertiNext account, the same for every apex in an environment, so the per-apex override
+    only ever served the negative test. A wrong host-level value on a host in maintenance tests the same path.
+  - F17 adds pusher work and its own untested LLD substitution, with Apple's 2026-11-30 deadline close.
+  </details>
 - [ ] **Session 5 — observation** (Follow-ups; runs any time after 2026-11-20 ~13:41Z)
 
 ### Cold-start protocol
@@ -480,7 +522,8 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
    - no persist or misroute triggers are firing
    - the old days-left WARNINGs are gone
 5. **Negative tests (Tod's call; live alerts):**
-   - a host-macro context override `{$CERTINEXT.PERSIST.EXPECTED:…}` on one apex → HIGH within ~15 min → revert
+   - a wrong host-level `{$CERTINEXT.PERSIST.EXPECTED}` on the sandbox host (in maintenance) → HIGH on every
+     apex after about 15 min (3 lookups; the `count()` gate) → revert (rc2; no per-apex override exists)
    - send one sandbox run to the prod host (`--zabbix-host`) → misroute HIGH → revert
    - point `{$CERTINEXT.DNS.RESOLVER.1}` at 192.0.2.1 on the sandbox host → "lookup failing" fires, "record
      missing" does not → revert
@@ -511,6 +554,10 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
 - 2026-11-20 ~13:41Z: watch the prod org apex after its `validTill` lapses. If `dcvStatus` leaves VERIFIED, the
   `unverified` metric needs method-awareness too, and the INFO trigger shows whether revalidation is lazy.
 - `orders.failed_recent` (prod) = 1 as of 2026-11-18: look at it separately.
+- F17 (tower-projects#4 note 22174): the daily `--expiry-days` run reads the DNS-PERSIST option's record value
+  from the CA's API and sends it as `{#PERSIST.EXPECTED}` in each discovery row. Fail closed if unreadable;
+  keep a manual override; amend ADR 0014. First prove live that a bare LLD macro inside a quoted `find()`
+  parameter is substituted on 7.0.
 - One prod apex carries a persist value for a second CA: ask who authorised it.
 
 ## References
@@ -521,6 +568,7 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
 - [Zabbix 7.0 low-level discovery][lld]
 - [Zabbix 7.0 item value preprocessing][preproc]
 - [Zabbix 7.0 macros supported by location][macros-loc]
+- [Zabbix 7.0 user macros with context](https://www.zabbix.com/documentation/7.0/en/manual/config/macros/user_macros_context)
 - [Zabbix 7.0 string functions (`find`)][fn-string] · [history functions (`nodata`)][fn-history]
 - [Zabbix 7.0 item object API (preprocessing parameters)][item-api] ·
   [template export/import schema][export-schema]

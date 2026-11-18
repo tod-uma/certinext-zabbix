@@ -91,7 +91,7 @@ follow the upgrade section of the root repo's
 | Macro | Default | Meaning |
 | --- | --- | --- |
 | `{$CERTINEXT.ENV}` | `prod` | **Set on each host.** The environment whose pusher runs target this host. Used in names and the `env` tag, and compared against the `certinext.env` value each run sends. |
-| `{$CERTINEXT.PERSIST.EXPECTED}` | `CONFIGURE-ME` | **Set on each host.** Exact `_validation-persist` TXT value, unquoted. Fails closed. Override one apex with context: `{$CERTINEXT.PERSIST.EXPECTED:example.edu}`. |
+| `{$CERTINEXT.PERSIST.EXPECTED}` | `CONFIGURE-ME` | **Set on each host.** Exact `_validation-persist` TXT value, unquoted: the full string (`ssl.com; accounturi=https://…`), not just the CA or API hostname. One value per host, no per-apex override. Fails closed. |
 | `{$CERTINEXT.SENDER.ALLOWED}` | `127.0.0.1` | **Must override.** Source IP(s) of the pusher machine. Trapper items and the discovery rule reject any other sender. |
 | `{$CERTINEXT.DCV.WARN_DAYS}` | `3` | WARNING when the soonest **token-method** DCV expiry is within this many days. Sized for a ~10-day DCV window; for a CA with long windows (emSign's were about a year) raise `WARN_DAYS`/`AVG_DAYS` (the 0.1.0 defaults were `14`/`7`). DNS-PERSIST domains never reach these triggers. |
 | `{$CERTINEXT.DCV.AVG_DAYS}` | `2` | AVERAGE threshold (days), token-method domains. |
@@ -207,8 +207,8 @@ Per discovered apex:
 
 | Trigger prototype | Severity | Fires on |
 | --- | --- | --- |
-| dns-persist record missing for `{#APEX}` | HIGH | None of the last 3 local lookups contains `"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}"` (quotes included). |
-| dns-persist record for `{#APEX}` not visible publicly | AVERAGE | Either public resolver's last 2 lookups lack the value. Depends on "record missing", so a record gone everywhere raises only the HIGH. |
+| dns-persist record missing for `{#APEX}` | HIGH | At least 3 local lookups exist and none of the last 3 contains `"{$CERTINEXT.PERSIST.EXPECTED}"` (quotes included). |
+| dns-persist record for `{#APEX}` not visible publicly | AVERAGE | Either public resolver has at least 2 lookups and its last 2 lack the value. Depends on "record missing", so a record gone everywhere raises only the HIGH. |
 | dns-persist TXT lookup failing for `{#APEX}` | AVERAGE | `nodata()` on any of the three lookups for `{$CERTINEXT.DNS.NODATA}`: a resolver or the agent is failing, not the record. |
 
 The four DCV-expiry triggers are dependency-chained, so only the most

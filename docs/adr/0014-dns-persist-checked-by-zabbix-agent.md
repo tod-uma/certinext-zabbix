@@ -73,13 +73,22 @@ discovery rule creates, per apex, three passive agent items
 | `{$CERTINEXT.DNS.RESOLVER.1}` (1.1.1.1), `RESOLVER.2` (8.8.8.8) | `DNS.INTERVAL.EXTERNAL` (1h) | not visible publicly: no match in the last 2 values on either; depends on "record missing" | AVERAGE |
 | all three | `DNS.NODATA` (3h) | lookup failing: `nodata()` on any of them | AVERAGE |
 
-- A match is `find(…,"like","\"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}\"")`:
+- A match is `find(…,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")`:
   the exact value, inside its quotes, as agent2 returns it
-  (`<name> TXT "<value>"`, verified on agent2 7.0.31).
+  (`<name> TXT "<value>"`, verified on agent2 7.0.31). Each `find()` is
+  gated on `count(…,#N)>=N`, so a newly discovered apex needs a full
+  window (3 local or 2 public lookups) before it can alert;
+  `find(…,#3)` alone evaluates on however many values exist.
 - `{$CERTINEXT.PERSIST.EXPECTED}` defaults to `CONFIGURE-ME` and so
   **fails closed**: every apex alerts until the host macro holds the real
   value. The value lives only in host macros, because this repo mirrors
-  publicly. A per-apex override uses the macro context.
+  publicly. It is **one value per host, with no per-apex override**.
+  0.2.0rc1 used the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}`,
+  but an unquoted context ends at the first `}`, so Zabbix 7.0 parsed it
+  as context `{#APEX` plus a stray `}`. LLD never substituted it, and
+  every apex alerted on its first lookup (session 4, live). The value is
+  per CertiNext account, the same for every apex in an environment, so
+  the override was only ever wanted for the negative test.
 - Preprocessing maps only `^Cannot perform DNS query` (agent2's error for a
   missing name) to an empty value, so "record missing" fires. Other errors,
   such as a resolver timeout, stay unsupported, so they surface as "lookup
@@ -137,13 +146,16 @@ risk here, items deleted after a partial list, is handled by the
 
 - `tests/test_template.py` checks that every `KEY_*` the pusher sends
   exists in the template, that every `{#…}` macro under the rule is a
-  column the pusher sends, and that every macro used is declared.
-- Still to run, live (plan session 4): the template import (the export
-  constants for preprocessing and the rule's lifetime are confirmed
-  against the 7.0 docs, not yet by an import), item and trigger counts
-  after the first runs, and negative tests (a per-apex `EXPECTED`
-  override raises HIGH; a dead `RESOLVER.1` raises "lookup failing" and
-  not "record missing").
+  column the pusher sends, and that every macro used is declared. It
+  also rejects an LLD macro inside an unquoted user-macro context and
+  any persist `find()` without its `count()` gate.
+- Confirmed live (session 4, 0.2.0rc1): the import, the preprocessing
+  export constants, and item and trigger counts after the first runs.
+- Still to run, live (0.2.0rc2): that the expected value now matches
+  (no "record missing" on any apex after a full window), and the
+  negative tests: a wrong host-level `EXPECTED` on a host in
+  maintenance raises HIGH on every apex after about 15 minutes; a dead
+  `RESOLVER.1` raises "lookup failing" and not "record missing".
 
 ## Pros and cons of the options
 

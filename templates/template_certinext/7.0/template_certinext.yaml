@@ -604,14 +604,14 @@ zabbix_export:
           value: '{$CERTINEXT.ENV}'
         trigger_prototypes:
         - uuid: 60c21b5d5d2f4d6d82a5a70b587e7255
-          expression: 'find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}\"")=0'
+          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0'
           name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record missing for {#APEX}'
           opdata: 'TXT: {ITEM.LASTVALUE1}'
           priority: HIGH
           description: |
             None of the last 3 lookups (about 15 minutes) of
             _validation-persist.{#APEX} TXT on the local resolver contained
-            the expected value {$CERTINEXT.PERSIST.EXPECTED:{#APEX}}. The CA
+            the expected value {$CERTINEXT.PERSIST.EXPECTED}. The CA
             checks this record at every validation and issuance, so
             certificate orders for {#APEX} and its subdomains will fail DCV
             until it is restored. Republish the record with your DCV
@@ -670,7 +670,7 @@ zabbix_export:
           value: '{$CERTINEXT.ENV}'
       trigger_prototypes:
       - uuid: da77e35dc0344aa489cb0c6d346afd54
-        expression: 'find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}\"")=0 or find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}\"")=0'
+        expression: '(count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0) or (count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0)'
         name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record for {#APEX} not visible publicly'
         opdata: '{$CERTINEXT.DNS.RESOLVER.1}: {ITEM.LASTVALUE1}; {$CERTINEXT.DNS.RESOLVER.2}: {ITEM.LASTVALUE2}'
         priority: AVERAGE
@@ -683,7 +683,7 @@ zabbix_export:
           resolvers aren't serving a stale negative answer.
         dependencies:
         - name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record missing for {#APEX}'
-          expression: 'find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}\"")=0'
+          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0'
         tags:
         - tag: env
           value: '{$CERTINEXT.ENV}'
@@ -757,7 +757,7 @@ zabbix_export:
       description: 'How long a generated certificate may sit undownloaded before its trigger fires. Longer than STUCK_AGE: a manual portal order can legitimately wait for someone to collect it, whereas an ACME order should download within seconds'
     - macro: '{$CERTINEXT.PERSIST.EXPECTED}'
       value: CONFIGURE-ME
-      description: 'SET ON EACH HOST: the exact value of your _validation-persist TXT record, without the surrounding quotes (e.g. ssl.com; accounturi=https://...). The default matches nothing, so every discovered apex alerts until it is set — fail closed. Override one apex with context: {$CERTINEXT.PERSIST.EXPECTED:example.edu}'
+      description: 'SET ON EACH HOST: the exact value of your _validation-persist TXT record, without the surrounding quotes: the full string (e.g. ssl.com; accounturi=https://...), not just the CA or API hostname. One value per host; there is no per-apex override (Zabbix does not substitute an LLD macro in an unquoted macro context). The default matches nothing, so every discovered apex alerts until it is set — fail closed.'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'
