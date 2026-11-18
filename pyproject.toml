@@ -32,6 +32,12 @@ dev = [
     "pyright>=1.1",
     "ruff>=0.4",
 ]
+# Read CertiNext credentials from the OS keyring (profiles saved with the
+# certinext CLI). Without it a local run falls back to an interactive prompt,
+# which fails under uv run / CI with EOFError.
+keyring = [
+    "certinext[keyring]",
+]
 
 [project.scripts]
 certinext-zabbix-push = "certinext_zabbix.zabbix_push_cli:main"
