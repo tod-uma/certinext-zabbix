@@ -88,6 +88,19 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
     - **For step 4 / ADR 0014:** document the apex-count item and trigger, and why its window is 4 days (the
       rule's 3-day lifetime plus one daily run). It does not catch one apex removed and another added in the
       same run.
+  - [x] docs and ADRs (step 4), 2026-11-18: `5fd865a` (ADRs 0013/0014; 0012 marked superseded, 0009 amended
+    note, IDEA-005 answered), `10d2e55` (template README rewrite, `docs/deployment.md` incl. *Upgrading from
+    0.1.x*, examples), `b8361d1` (README, llms.txt, AGENTS/CLAUDE key-sync + remote `origin`, IDEA-007,
+    IDEA-002/004 notes). **As built:**
+    - **The upgrade section leads with in-place** (Tod's choice): re-import over the existing template with
+      *Delete missing*; the kept prod UUIDs should rename the existing host's items to bare keys and keep
+      history, so that host becomes the prod host and only sandbox gets a new host. **Unverified**: the doc
+      says so and tells the operator how to check; Verification 3 settles it. Fresh hosts are documented as
+      the alternative. Step 5's Tod list below is rewritten to match.
+    - Fixed pre-existing drift while there: the deployment checklist said four unit files / two timers (it has
+      been six / three since the hourly order-health timer, #8).
+    - The README screenshot is captioned as a 0.1.x view, not retaken (needs a live 0.2.0 host).
+    - IDEA-007 has no coordinating GitLab issue yet (the `adr` skill wants one for a Proposed idea): ask Tod.
   - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
 - [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
   doing the shipping, if Tod drops R2.
@@ -396,14 +409,22 @@ Hand-written; new UUIDs via `uuid.uuid4().hex`.
 
 CI green → `/mr` → merge → release the 0.2.0 pre-release.
 
-**Tod's UMS cut-over (session 4):**
+**Tod's UMS cut-over (session 4)**, revised in session 3 to the in-place path (Tod's choice; follows
+`docs/deployment.md` *Upgrading from 0.1.x*, which is also what R2 would review):
 
-1. Create the two logical hosts, with the pusher host's agent IP and the same proxy as today.
-2. Set the host macros: `ENV`, `PERSIST.EXPECTED` (full quoted value, prod and sandbox respectively),
-   `SENDER.ALLOWED`.
-3. Re-import the template; unlink and clear the old template from the current pusher host.
-4. tower-projects (ums.pki): new version, `ZABBIX_HOSTNAME` per environment's units.
+1. Re-import the template over the existing one (*Update existing* + *Delete missing* for items, triggers,
+   discovery rules). Check *Latest data* on the current pusher host: do the bare-key items carry pre-upgrade
+   history? Record the answer here (it confirms or refutes the doc's "expected" claim).
+2. The current pusher host becomes the prod host: `ENV` stays at the `prod` default; it already has an agent
+   interface; set `PERSIST.EXPECTED` (the full value, unquoted). `SENDER.ALLOWED` and the 3/2/1/0 overrides
+   carry over.
+3. Create the sandbox logical host (pusher machine's agent IP, same proxy as today), macros `ENV=sandbox`,
+   `PERSIST.EXPECTED` (sandbox value), `SENDER.ALLOWED`, and a higher `ORDER.DAYS_SINCE_ISSUED_MAX`.
+4. tower-projects (ums.pki): new version, `ZABBIX_HOSTNAME` = the sandbox host on the sandbox units only.
 5. Drop any `-9999` DCV overrides.
+
+The fresh-hosts path (two new logical hosts, unlink and clear the old template) remains the fallback if step 1
+shows the in-place rename misbehaving.
 
 ## Verification
 
