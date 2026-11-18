@@ -11,9 +11,11 @@ dependencies, malformed UUIDs).
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +32,8 @@ SENDER_MACRO = "{$CERTINEXT.SENDER.ALLOWED}"
 
 #: Matches a user macro, capturing its name without any ``:context``.
 _MACRO_RE = re.compile(r"\{\$([A-Z0-9_.]+)(?::[^}]*)?\}")
+#: Matches an LLD macro such as ``{#APEX}``.
+_LLD_MACRO_RE = re.compile(r"\{#[A-Z0-9_.]+\}")
 #: Matches the item key in a trigger function's ``/host/key`` reference.
 _ITEM_REF_RE = re.compile(r"/" + re.escape(TEMPLATE_NAME) + r"/([a-z0-9_.]+(?:\[[^\]]*\])?)")
 
@@ -279,6 +283,15 @@ class TestStructure:
             assert step["parameters"] == ["0", "^Cannot perform DNS query"]
             assert step["error_handler"] == "CUSTOM_VALUE"
             assert step["error_handler_params"] == ""
+
+    def test_lld_macros_are_ones_the_pusher_sends(self, template: dict[str, Any]) -> None:
+        """Every {#MACRO} in the persist rule is a column of the pusher's discovery rows."""
+        domain = SimpleNamespace(name="example.edu")
+        row = json.loads(zabbix_push.persist_discovery_value([domain]))[0]  # type: ignore[list-item]
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        used = {m for n in _walk(rule) if isinstance(n, str) for m in _LLD_MACRO_RE.findall(n)}
+        assert used, "no LLD macros found in the persist rule"
+        assert used <= set(row), f"LLD macros the pusher never sends: {used - set(row)}"
 
     def test_persist_prototypes_check_three_resolvers(self, template: dict[str, Any]) -> None:
         """One local and two external TXT lookups per discovered apex."""
