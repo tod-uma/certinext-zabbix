@@ -3,6 +3,12 @@ status: accepted
 date: 2026-08-07
 ---
 
+> **Amended by [ADR 0013](0013-one-zabbix-host-per-certinext-environment.md)
+> (2026-11-18):** the decision stands, but each environment is now its own
+> Zabbix host and the `env` tag comes from the `{$CERTINEXT.ENV}` host
+> macro. The per-environment `[prod]`/`[sandbox]` items described below no
+> longer exist.
+
 # Sandbox does not notify — suppressed by Zabbix action filter, not by removing triggers
 
 ## Context and problem statement
