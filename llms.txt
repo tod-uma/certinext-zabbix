@@ -1,7 +1,8 @@
 # certinext-zabbix
 
-> CertiNext DCV health monitoring for Zabbix: a trapper-only Zabbix
-> template (`templates/template_certinext/7.0/`) plus the
+> CertiNext DCV health monitoring for Zabbix: a Zabbix template
+> (`templates/template_certinext/7.0/`; trapper items plus agent checks
+> of dns-persist TXT records, one Zabbix host per environment) plus the
 > `certinext-zabbix-push` typer CLI that feeds it. Public, PyPI-ready
 > (not yet published), and canonical — `ums-certinext-scripts` (a
 > University of Maine System internal repository, not publicly
@@ -25,13 +26,15 @@ would do.
   `certinext-zabbix-push` unattended — systemd timer (recommended), cron,
   and Windows Task Scheduler configurations; environment-variable and
   flag reference; the one-time Zabbix template import/link/macro setup;
-  network requirements; validation steps; a configuration-management
-  (Ansible) task checklist. **Read this before writing any install/deploy
+  network requirements; validation steps; the 0.1.x → 0.2.0 upgrade;
+  a configuration-management (Ansible) task checklist. **Read this before writing any install/deploy
   automation for this repo.**
 - [Per-template README](templates/template_certinext/7.0/README.md):
   stands on its own for the "import the template" story — required
-  macros, the fourteen trapper items, the twenty-two triggers, and an
-  author line, per the Zabbix community-templates conventions.
+  host setup (one host per CertiNext environment), macros, the thirteen
+  trapper items, the dns-persist discovery rule, the sixteen triggers and
+  three trigger prototypes, and an author line, per the Zabbix
+  community-templates conventions.
 - [examples/systemd/](examples/systemd/), [examples/cron/](examples/cron/),
   [examples/windows/](examples/windows/): ready-to-adapt unit files,
   cron lines, and Task Scheduler scripts referenced from
@@ -42,6 +45,8 @@ would do.
   — start with ADRs 0001–0006, this repo's foundational decisions
   (standalone repo, copy-now/canonical-later, PyPI-not-published-yet,
   GitHub push mirror, MIT license, community-templates-ready layout).
+  ADRs 0013 (one Zabbix host per environment) and 0014 (dns-persist
+  checked by the agent; DCV alerts by method) explain the 0.2.0 shape.
 - [docs/wishlist/](docs/wishlist/): ideas deferred for later, with the
   reasoning for deferring — see `docs/wishlist/README.md` for the index
   and status vocabulary.

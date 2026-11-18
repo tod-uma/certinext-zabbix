@@ -78,12 +78,16 @@ def _assert_paired_debug_traceback(
     )
 
 
-def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
+def _verified_domain(
+    name: str, expires: datetime | None = None, method: str = "DNS-TXT",
+) -> MagicMock:
     """Build a mock ACTIVE+VERIFIED domain with a no-op refresh.
 
     Args:
         name: Domain name.
         expires: Value for ``dcv_expires`` after refresh, or None.
+        method: DCV method its ``get_dcv()`` reports; defaults to a token
+            method so pre-split tests keep their meaning.
 
     Returns:
         A MagicMock with the Domain attributes the CLI touches.
@@ -93,6 +97,7 @@ def _verified_domain(name: str, expires: datetime | None = None) -> MagicMock:
     )
     # `name` is a reserved MagicMock constructor kwarg — set the attribute directly.
     domain.name = name
+    domain.get_dcv.return_value = SimpleNamespace(method=method)
     # No covering ancestor by default, so the default (top) --domain-scope
     # keeps this domain instead of silently filtering it out via
     # certinext.filter_needs_dcv's dcv_covering_parent() check.
@@ -141,7 +146,7 @@ def _run(
     (default empty) from its single unfiltered
     :meth:`OrderAccessor.get_list` call. push_metrics returns *response*,
     and the resolved
-    connection reports *sandbox* (drives the [env] key parameter).
+    connection reports *sandbox* (drives the ``certinext.env`` value).
     ``ZABBIX_SERVER`` defaults to a test value since the CLI now requires it
     with no built-in default — pass ``env={"ZABBIX_SERVER": ...}`` to
     override, or ``env={"ZABBIX_SERVER": None}`` to unset it entirely.
@@ -265,25 +270,39 @@ class TestRunOutcomes:
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
         assert metrics == {
-            "certinext.domains.total[prod]": 0,
-            "certinext.domains.unverified[prod]": 0,
+            "certinext.domains.total": 0,
+            "certinext.domains.unverified": 0,
+            "certinext.env": "prod",
         }
         data = _stdout_json(result)
         assert data["sent"] is True
         assert data["env"] == "prod"
         assert data["metrics"] == metrics
 
-    def test_sandbox_connection_uses_sandbox_keys(self) -> None:
+    def test_sandbox_connection_sends_sandbox_env(self) -> None:
         result, mocks = _run(sandbox=True)
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
-        # The [env] parameter comes from the resolved connection, so sandbox
-        # data can never land in the prod items.
+        # Keys are bare; the environment travels as certinext.env, derived
+        # from the resolved connection, so the template's misroute trigger
+        # catches a sandbox run sent to the prod host.
         assert metrics == {
-            "certinext.domains.total[sandbox]": 0,
-            "certinext.domains.unverified[sandbox]": 0,
+            "certinext.domains.total": 0,
+            "certinext.domains.unverified": 0,
+            "certinext.env": "sandbox",
         }
         assert _stdout_json(result)["env"] == "sandbox"
+
+    def test_env_sent_on_every_job(self) -> None:
+        for argv in (["--expiry-days", "14"], ["--order-health"]):
+            result, mocks = _run(argv=argv)
+            assert result.exit_code == 0, argv
+            (metrics,) = mocks.push.call_args.args
+            assert metrics["certinext.env"] == "prod", argv
+
+    def test_dry_run_output_includes_env(self) -> None:
+        result, _ = _run(argv=["--dry-run"], sandbox=True)
+        assert _stdout_json(result)["metrics"]["certinext.env"] == "sandbox"
 
     def test_dry_run_pushes_nothing(self) -> None:
         result, mocks = _run(argv=["--dry-run"])
@@ -361,13 +380,78 @@ class TestExpiryPath:
         assert result.exit_code == 0
         domains[0].refresh.assert_called_once_with()
         (metrics,) = mocks.push.call_args.args
-        assert metrics["certinext.dcv.expiring[prod]"] == 1
-        assert "certinext.dcv.min_days_left[prod]" in metrics
+        assert metrics["certinext.dcv.expiring"] == 1
+        assert "certinext.dcv.min_days_left" in metrics
 
     def test_without_flag_no_refresh(self) -> None:
         domains = [_verified_domain("verified.edu")]
         _run(domains=domains)
         domains[0].refresh.assert_not_called()
+        domains[0].get_dcv.assert_not_called()
+
+    def test_persist_discovery_sent_with_every_persist_apex(self) -> None:
+        later = datetime.now(timezone.utc) + timedelta(days=5)
+        domains = [
+            _verified_domain("b.example.edu", expires=later, method="DNS-PERSIST"),
+            _verified_domain("token.example.edu", expires=later),
+            _verified_domain("a.example.edu", expires=later, method="DNS-PERSIST"),
+        ]
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
+        assert result.exit_code == 0
+        (metrics,) = mocks.push.call_args.args
+        assert json.loads(metrics["certinext.dcv.persist.discovery"]) == [
+            {"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"},
+        ]
+        assert metrics["certinext.dcv.persist_apexes"] == 2
+        # Only the token domain feeds the token metrics.
+        assert metrics["certinext.dcv.token_domains"] == 1
+        assert metrics["certinext.dcv.expiring"] == 1
+        assert "certinext.dcv.persist_min_days_left" in metrics
+
+    def test_all_persist_run_sends_no_min_days_left(self) -> None:
+        domains = [_verified_domain(
+            "p.example.edu", expires=datetime.now(timezone.utc), method="DNS-PERSIST",
+        )]
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
+        assert result.exit_code == 0
+        (metrics,) = mocks.push.call_args.args
+        assert "certinext.dcv.min_days_left" not in metrics
+        assert metrics["certinext.dcv.token_domains"] == 0
+        assert metrics["certinext.dcv.expiring"] == 0
+        assert "certinext.dcv.persist_min_days_left" in metrics
+
+    def test_dcv_method_failure_withholds_discovery_and_expiry(self) -> None:
+        # A partial discovery list would make Zabbix delete the missing
+        # apex's DNS items; partial token counts would undercount.
+        bad = _verified_domain("bad.example.edu")
+        bad.get_dcv.side_effect = RuntimeError("api down")
+        good = _verified_domain("good.example.edu", method="DNS-PERSIST")
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=[bad, good])
+        assert result.exit_code == 1
+        (metrics,) = mocks.push.call_args.args
+        assert "certinext.dcv.persist.discovery" not in metrics
+        # The count rides with the list: alone, a short count would fire
+        # "apex count dropped" for a list Zabbix never received.
+        assert "certinext.dcv.persist_apexes" not in metrics
+        assert "certinext.dcv.expiring" not in metrics
+        assert "certinext.dcv.token_domains" not in metrics
+        good.refresh.assert_not_called()
+        # The cheap metrics and the env guard still go out.
+        assert metrics["certinext.domains.total"] == 2
+        assert metrics["certinext.env"] == "prod"
+
+    def test_refresh_failure_still_sends_complete_discovery(self) -> None:
+        # The method split was complete, so the discovery list is too; only
+        # the expiry numbers depend on the detail refresh.
+        bad = _verified_domain("bad.example.edu", method="DNS-PERSIST")
+        bad.refresh.side_effect = RuntimeError("api down")
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=[bad])
+        assert result.exit_code == 1
+        (metrics,) = mocks.push.call_args.args
+        assert json.loads(metrics["certinext.dcv.persist.discovery"]) == [
+            {"{#APEX}": "bad.example.edu"},
+        ]
+        assert "certinext.dcv.persist_min_days_left" not in metrics
 
     def test_refresh_failure_skips_expiry_metrics_but_pushes_rest(self) -> None:
         bad = _verified_domain("bad.edu")
@@ -376,8 +460,8 @@ class TestExpiryPath:
         assert result.exit_code == 1
         (metrics,) = mocks.push.call_args.args
         # A partial refresh must not push an undercounted expiring value.
-        assert "certinext.dcv.expiring[prod]" not in metrics
-        assert metrics["certinext.domains.total[prod]"] == 1
+        assert "certinext.dcv.expiring" not in metrics
+        assert metrics["certinext.domains.total"] == 1
 
     def test_expected_refresh_error_logs_concisely_not_a_traceback(self) -> None:
         """A degraded API can time out on every domain in a run — one log
@@ -429,11 +513,11 @@ class TestOrderHealthPath:
         result, mocks = _run(argv=["--order-health"], orders=orders)
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
-        assert metrics["certinext.orders.unissued[prod]"] == 1
-        assert metrics["certinext.orders.undownloaded[prod]"] == 1
-        assert "certinext.orders.failed_recent[prod]" in metrics
-        assert "certinext.orders.expiring[prod]" in metrics
-        assert "certinext.orders.days_since_issued[prod]" in metrics
+        assert metrics["certinext.orders.unissued"] == 1
+        assert metrics["certinext.orders.undownloaded"] == 1
+        assert "certinext.orders.failed_recent" in metrics
+        assert "certinext.orders.expiring" in metrics
+        assert "certinext.orders.days_since_issued" in metrics
 
     def test_without_flag_orders_not_fetched(self) -> None:
         _, mocks = _run()
@@ -502,8 +586,8 @@ class TestOrderHealthPath:
             )
         assert result.exit_code == 1
         (metrics,) = mock_push.call_args.args
-        assert "certinext.orders.pending[prod]" not in metrics
-        assert metrics["certinext.domains.total[prod]"] == 0
+        assert "certinext.orders.pending" not in metrics
+        assert metrics["certinext.domains.total"] == 0
 
     def test_expected_fetch_error_logs_concisely_not_a_traceback(self) -> None:
         exc = httpx.ReadTimeout("timed out")
@@ -606,7 +690,7 @@ class TestDomainScope:
         assert result.exit_code == 0
         mock_scope.assert_called_once_with(raw, mock_scope.call_args.args[1])
         (metrics,) = mocks.push.call_args.args
-        assert metrics["certinext.domains.total[prod]"] == 1
+        assert metrics["certinext.domains.total"] == 1
 
     def test_expiry_refresh_retries_transient_failure(self) -> None:
         # Proves the CLI calls refresh_domain (which retries), not a bare
@@ -619,7 +703,7 @@ class TestDomainScope:
         assert flaky.refresh.call_count == 2
         mock_sleep.assert_called_once_with(5.0)
         (metrics,) = mocks.push.call_args.args
-        assert "certinext.dcv.expiring[prod]" in metrics
+        assert "certinext.dcv.expiring" in metrics
 
 
 class TestValidatedBy:

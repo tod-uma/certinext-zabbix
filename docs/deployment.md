@@ -115,7 +115,10 @@ root only — systemd reads `EnvironmentFile=` as root before dropping to
 CERTINEXT_CLIENT_ID=<account number>
 CERTINEXT_CLIENT_SECRET=<client secret>
 ZABBIX_SERVER=<your zabbix server address>
-ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
+# The Zabbix host for THIS environment (one host per environment):
+ZABBIX_HOSTNAME=<prod host name exactly as registered in Zabbix>
+# Only if the account also holds other CAs' records (see --validated-by):
+#CERTINEXT_VALIDATED_BY=SSLCOM
 
 # Only if this host lacks direct HTTPS egress to the CertiNext API:
 #HTTPS_PROXY=http://proxy.example.org:3128
@@ -130,14 +133,14 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 | `CERTINEXT_CLIENT_SECRET` | yes | — | CertiNext OAuth2 client secret |
 | `ZABBIX_SERVER` | yes | — | Zabbix trapper address. No built-in default — an unset value fails fast rather than silently targeting the wrong server. **If the Zabbix host is monitored by a proxy, point this at the proxy, not the server** — see [Proxies and proxy groups](#proxies-and-proxy-groups). |
 | `ZABBIX_PORT` | no | `10051` | Zabbix trapper port |
-| `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable |
+| `ZABBIX_HOSTNAME` | no | this machine's FQDN | Host name exactly as registered in Zabbix — **set explicitly in production**; the FQDN fallback depends on `/etc/hosts`/reverse DNS and logs a warning when it looks unusable. Each CertiNext environment has its own Zabbix host ([ADR 0013](adr/0013-one-zabbix-host-per-certinext-environment.md)), so sandbox runs need a different value from prod runs — set it in each environment's env file |
 | `ZABBIX_TIMEOUT` | no | `10` | Socket timeout (seconds) for the trapper send |
 | `CERTINEXT_DOMAIN_SCOPE` | no | `top` | Which domains to monitor: `top`, `ns-boundary`, or `all` — see the CLI flag reference below |
 | `CERTINEXT_VALIDATED_BY` | no | unset (every CA) | Only monitor domain records validated by this CA, e.g. `SSLCOM` — see the CLI flag reference below. Empty means unset |
 | `CERTINEXT_ORDER_HEALTH` | no | off | Enable the order-health metrics — see the CLI flag reference below |
 | `CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS` | no | `30` | Only count failed orders from this many days back as "failed recently" |
 | `CERTINEXT_ORDER_HISTORY_DAYS` | no | `1095` | Bound the orders-report fetch to this many days back — see the CLI flag reference below |
-| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on JSON-lines DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
+| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on human-readable DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
 ### CLI flag reference
@@ -146,7 +149,7 @@ ZABBIX_HOSTNAME=<host name exactly as registered in Zabbix>
 |---|---|
 | `--dry-run` | Compute and print the metrics without sending anything to Zabbix. Use for validation. |
 | `--domain-scope {top,ns-boundary,all}` | Which domains to monitor — applies to all four metrics, not just expiry. `top` (default) excludes any domain with a registered ancestor in the account (no DNS lookups). `ns-boundary` does the same but re-includes a domain with its own NS records (a real DNS zone cut). `all` restores the pre-`--domain-scope` unfiltered behavior. Switching away from `all` causes a one-time drop in `certinext.domains.total` — expected, not a fault. |
-| `--validated-by CA` | Only monitor domain records validated by this CA (`SSLCOM`, `EMSIGN`; case-insensitive). CertiNext keeps one record per CA per name, so without it every CA's records are counted together. Applies to the domain and DCV-expiry metrics, not order health, and runs before `--domain-scope`. Item keys are unchanged, so switching CA is a step change in their history. Set it on **every** timer (frequent, daily-expiry and hourly) so they all measure the same CA. Don't set it before the account holds records for that CA, or `domains.total` reads 0 and the empty-list trigger fires. See [ADR 0011](adr/0011-dcv-metrics-single-ca-by-flag.md). |
+| `--validated-by CA` | Only monitor domain records validated by this CA (`SSLCOM`, `EMSIGN`; case-insensitive). CertiNext keeps one record per CA per name, so without it every CA's records are counted together. Applies to the domain and DCV-expiry metrics, not order health, and runs before `--domain-scope`. Item keys are unchanged, so switching CA is a step change in their history. Set it on **every** timer (frequent, daily-expiry and hourly) so they all measure the same CA. Each environment's env file sets it independently, according to the CAs that account holds; prod and sandbox can differ. Don't set it before the account holds records for that CA, or `domains.total` reads 0 and the empty-list trigger fires. See [ADR 0011](adr/0011-dcv-metrics-single-ca-by-flag.md). |
 | `--expiry-days DAYS` | Also push the DCV-expiry metrics (one extra API call **per verified domain** — a real prod run of this loop took 3m25s; schedule this on its own daily run, not more often). Disabled by default. |
 | `--order-health` | Also push the order-health metrics: orders awaiting issuance, certificates generated but never downloaded, orders that recently failed, and days since the last certificate was issued (one Orders Report fetch, paginated — 2 pages at current order volume, cheap). Schedule this **hourly**, on its own timer, separate from `--expiry-days` — the `unissued`/`undownloaded` "stuck" triggers use a `min()` window that needs multiple samples inside it to actually guard against a single noisy snapshot; at a daily cadence the window only ever held one sample and silently degraded to a plain threshold check (see [sysadmin/certinext-zabbix#8](https://gitlab.its.maine.edu/sysadmin/certinext-zabbix/-/issues/8)). Disabled by default. |
 | `--order-failing-lookback-days DAYS` | Only count failed orders from the last `DAYS` days toward the failed-recent metric. Default `30`. |
@@ -171,29 +174,45 @@ deployment sequence:
 1. Import
    [templates/template_certinext/7.0/template_certinext.yaml](../templates/template_certinext/7.0/template_certinext.yaml)
    via *Data collection → Templates → Import*. It creates **CertiNext DCV
-   by Zabbix trapper**: eighteen trapper items (each metric twice, key-
-   parameterized `[prod]` / `[sandbox]`), twenty-four triggers (including a
-   per-environment DCV-expiry severity gradient — WARNING → AVERAGE →
-   HIGH → DISASTER, dependency-chained so only the deepest tier alerts),
-   and the macros. Two items ship deliberately trigger-less:
-   `certinext.orders.expiring` (per
-   [ADR 0008](adr/0008-orders-expiring-ships-data-only.md)) and
-   `certinext.orders.days_since_issued`. The three sandbox `nodata()` triggers ship **disabled**
-   — enable them only once sandbox runs are scheduled.
-2. **Link** the template to the sending host's Zabbix host entry.
-3. The host entry's **"Host name" field must exactly match** what the
-   pusher sends — by default the machine's FQDN; override with
-   `--zabbix-host`/`ZABBIX_HOSTNAME` if they differ.
-4. **Set `{$CERTINEXT.SENDER.ALLOWED}`** (host- or template-level macro
-   override) to the source IP(s) of the host(s) running
-   `certinext-zabbix-push`. The committed value (`127.0.0.1`) rejects
-   every real sender until you do this.
-5. **Mute sandbox notifications**: every sandbox item/trigger is tagged
-   `env:sandbox`. In the trigger action(s) that send notifications
+   by Zabbix trapper**: thirteen trapper items with bare keys
+   (`certinext.domains.total`, …), sixteen triggers (including a DCV-expiry
+   severity gradient for token-method domains — WARNING → AVERAGE → HIGH
+   → DISASTER, dependency-chained so only the deepest tier alerts), a
+   dns-persist discovery rule whose prototypes are passive agent checks of
+   each apex's `_validation-persist` TXT record, and the macros.
+   `certinext.orders.expiring` ships deliberately trigger-less (per
+   [ADR 0008](adr/0008-orders-expiring-ships-data-only.md)). Upgrading
+   from 0.1.x? See [Upgrading from 0.1.x](#upgrading-from-01x) instead.
+2. **Create one Zabbix host per CertiNext environment** you monitor
+   ([ADR 0013](adr/0013-one-zabbix-host-per-certinext-environment.md)),
+   e.g. `CertiNext prod` (and `CertiNext sandbox` only if you
+   [monitor the sandbox](#optional-monitoring-the-sandbox-too)). Each one:
+   - **Host name** exactly matches what that environment's runs send as
+     `--zabbix-host`/`ZABBIX_HOSTNAME`. The prod host can simply be the
+     pusher machine's existing host entry, if it already has one.
+   - An **agent interface** pointing at the machine that runs the pusher
+     (the dns-persist checks are passive agent items; both hosts can point
+     at the same machine). That machine needs a Zabbix agent or agent 2.
+   - **Monitored by** the same server or proxy the trapper sends go to.
+   - **Linked** to the template.
+3. **Set the host macros** on each host:
+   - `{$CERTINEXT.ENV}` — `prod` or `sandbox`. Defaults to `prod`; a sandbox
+     host left at the default raises the HIGH *pusher data from the wrong
+     environment* trigger on its first run.
+   - `{$CERTINEXT.PERSIST.EXPECTED}` — that environment's
+     `_validation-persist` TXT value, **without** the surrounding quotes.
+     The default `CONFIGURE-ME` fails closed: every discovered apex raises
+     *record missing* until it is set.
+   - `{$CERTINEXT.SENDER.ALLOWED}` — the source IP(s) of the machine running
+     `certinext-zabbix-push`. The committed value (`127.0.0.1`) rejects
+     every real sender until you do this.
+4. **Mute sandbox notifications**: every item/trigger is tagged
+   `env:{$CERTINEXT.ENV}`. In the trigger action(s) that send notifications
    (*Alerts → Actions → Trigger actions*), add the condition *Tag value*
    | `env` | *does not equal* | `sandbox`. Sandbox problems then still
-   appear in the UI but never page anyone.
-6. **Clear the abandoned-order backlog before enabling order-health
+   appear in the UI but never page anyone. This relies on the sandbox
+   host's `{$CERTINEXT.ENV}` being set.
+5. **Clear the abandoned-order backlog before enabling order-health
    notifications** — see below.
 
 ### Clear the abandoned-order backlog first
@@ -228,7 +247,10 @@ small number that clears on its own within the macro window).
 |---|---|---|---|
 | frequent | every 6 hours | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
 | order-health | hourly | `certinext-zabbix-push --order-health` | `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch, 2 pages at current order volume) |
-| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.min_days_left` (one detail call **per verified domain** — the expensive one; a real prod run took 3m25s) |
+| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.token_domains`, `certinext.dcv.min_days_left`, `certinext.dcv.persist_min_days_left`, `certinext.dcv.persist_apexes` and the dns-persist discovery value (a DCV-method read per domain plus a detail call **per verified domain** — the expensive one; a real prod run took 3m25s before the method read was added) |
+
+Every run also sends `certinext.env`, the environment it connected to,
+which the template compares against the host's `{$CERTINEXT.ENV}`.
 
 Pick an `--expiry-days` lead time that sits comfortably inside your own
 DCV-renewal automation's lead time, so this monitor firing means renewal
@@ -376,7 +398,7 @@ a terminal. It is **host-local by design** and deliberately not ingested into
 Splunk, so reading it means SSH-ing to the host:
 
 ```bash
-grep -A30 'level=error' /var/log/certinext-zabbix/debug.log
+grep -A30 '\[error' /var/log/certinext-zabbix/debug.log
 ```
 
 Two consequences of that being host-local: log rotation is the only thing
@@ -438,7 +460,15 @@ order-health — alert after one missed hourly run is tolerated, a second
 alerts, via `{$CERTINEXT.NODATA.ORDER_HEALTH}` (3h); daily (expiry) —
 one missed daily run alerts, via `{$CERTINEXT.NODATA.DAILY}` (26h). If
 you change a timer's cadence materially, adjust the matching macro on the
-Zabbix side.
+Zabbix side. The daily window also covers the dns-persist discovery: the
+pusher never sends the daily items without it, so a stale discovery list
+shows up as *no data from pusher (daily expiry run)*.
+
+The dns-persist lookups are agent checks, not pusher data, with their own
+cadence: `{$CERTINEXT.DNS.INTERVAL.LOCAL}` (5m) and
+`{$CERTINEXT.DNS.INTERVAL.EXTERNAL}` (1h), with `{$CERTINEXT.DNS.NODATA}`
+(3h) as their *lookup failing* window. Keep `DNS.NODATA` above
+`DNS.INTERVAL.EXTERNAL`.
 
 `{$CERTINEXT.ORDER.STUCK_AGE}`'s `min()` trigger additionally assumes
 `--order-health` pushes **more often than once per STUCK_AGE window**
@@ -466,14 +496,23 @@ the full macro table.
 
 Sandbox monitoring is off by default — enable it only when there is a
 concrete need (e.g. watching sandbox state during a test campaign).
-Because the item keys are environment-parameterized, it needs **no new
-Zabbix host and no template change**:
+The sandbox gets **its own Zabbix host** linked to the same template
+([ADR 0013](adr/0013-one-zabbix-host-per-certinext-environment.md)); no
+template change:
 
-1. A separate env file with the **sandbox** credentials, e.g.
+1. A sandbox host, set up as in
+   [One-time Zabbix server setup](#one-time-zabbix-server-setup-not-a-playbook-task)
+   step 2, with `{$CERTINEXT.ENV}` = `sandbox`, the sandbox's own
+   `{$CERTINEXT.PERSIST.EXPECTED}`, and `{$CERTINEXT.SENDER.ALLOWED}`.
+   A low-volume sandbox account will also want a higher
+   `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}`.
+2. A separate env file with the **sandbox** credentials and host name, e.g.
    `/etc/certinext-zabbix/certinext-zabbix-sandbox.env` (mode 0600,
    root-owned) with `CERTINEXT_CLIENT_ID`/`CERTINEXT_CLIENT_SECRET` — the
-   sandbox account's values.
-2. Timer/service pairs mirroring the prod ones (frequent, hourly
+   sandbox account's values — and `ZABBIX_HOSTNAME` set to the sandbox
+   host's name. Without it, sandbox runs land on the prod host and raise
+   its misroute trigger.
+3. Timer/service pairs mirroring the prod ones (frequent, hourly
    order-health, daily expiry — same three-way split), with
    `EnvironmentFile=/etc/certinext-zabbix/certinext-zabbix-sandbox.env`
    and `ExecStart=/opt/certinext-zabbix/bin/certinext-zabbix-push --sandbox`
@@ -483,13 +522,154 @@ Zabbix host and no template change**:
    Offset the timers from the prod ones; the locks are per environment, so
    overlap is harmless but staggering avoids hitting CertiNext
    simultaneously.
-3. Enable the three disabled `CertiNext sandbox: no data from pusher`
-   triggers on the template (frequent, hourly order-health, daily expiry).
+4. If you skip any of the three sandbox schedules, disable the matching
+   *no data from pusher* trigger on the sandbox host (not the template).
 
-Sandbox runs push into the `[sandbox]` items automatically (the pusher
-derives the key parameter from its connection). With the `env:sandbox`
-action condition from the one-time setup, sandbox problems stay visible
-in the UI but never notify.
+With the `env:sandbox` action condition from the one-time setup, sandbox
+problems stay visible in the UI but never notify.
+
+## Upgrading from 0.1.x
+
+0.2.0 changes **every item key**: `certinext.domains.total[prod]` becomes
+`certinext.domains.total`, and each environment moves to its own Zabbix
+host ([ADR 0013](adr/0013-one-zabbix-host-per-certinext-environment.md)).
+A 0.1.x template rejects a 0.2.0 pusher's values and vice versa, so
+upgrade both together, **Zabbix side first**, with the pusher's timers
+stopped in between. A run that lands mid-upgrade fails with
+`Zabbix rejected item values` and exits 1. The hourly order-health timer
+makes that likely, unless the timers are stopped.
+
+**Pick a path before you start.** Both share the preparation, the timer
+stop and the in-place re-import, so either way you learn whether history
+carried over. They differ in which Zabbix hosts receive 0.2.0's data:
+
+- **Path A, keep the existing host** as the prod host. Fits when that host
+  exists only for CertiNext monitoring.
+- **Path B, fresh hosts** (`CertiNext prod`, `CertiNext sandbox`). Fits
+  when the existing host is the pusher machine's own entry, carrying its
+  OS or other monitoring. The CertiNext data then gets hosts of its own,
+  and the old host is cleared at the end.
+
+### Before the change window
+
+1. **Prepare the pusher side completely.** If configuration management
+   deploys the pusher, have the role and pin change released, merged and
+   ready to run; it can't be produced inside the window. Each
+   environment's env file needs its own `ZABBIX_HOSTNAME` (see
+   [Configuration-management checklist](#configuration-management-checklist)).
+2. **Have each environment's `{$CERTINEXT.PERSIST.EXPECTED}` value ready.**
+   It is the `DNS-PERSIST` option's record value in the domain's DCV detail,
+   for example
+   `certinext-domains [--profile sandbox] get-dcv <apex> --validated-by SSLCOM`.
+   It names the CertiNext account, so one value covers every apex in an
+   environment, and prod and sandbox differ. Take it from CertiNext, not
+   from DNS: reading it back from the published record makes the check
+   circular.
+3. **Check the new network paths** from the pusher machine:
+   `dig +short @1.1.1.1 TXT _validation-persist.<apex>` and the same with
+   `@8.8.8.8` should both return the record. From the Zabbix server or
+   proxy, `zabbix_get -s <pusher machine> -k agent.variant` must answer
+   (`1` = agent, `2` = agent 2); see the template README's
+   *Requirements* for why the variant matters.
+4. **Note one item ID.** On the existing host, open
+   `certinext.domains.total[prod]` and note its item ID (in the edit
+   page's URL). Step 2 uses it to tell an in-place update from a restart.
+5. **Read [New alerts after upgrading](#new-alerts-after-upgrading)**, and
+   raise `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` where it applies.
+
+### Both paths: stop, then re-import
+
+1. **Stop every pusher timer, every environment**:
+   `systemctl stop 'certinext-zabbix-push*.timer'`. The last step starts
+   them again.
+2. **Re-import the template over the existing one**
+   (*Data collection → Templates → Import*). Under *Rules*, tick
+   *Update existing* everywhere and *Delete missing* for items, triggers
+   and discovery rules, so the old `[sandbox]` copies are removed.
+   The 0.2.0 template keeps the 0.1.x `[prod]` items' UUIDs, so Zabbix is
+   expected to update them **in place** to the bare keys, and the linked
+   host keeps their history. This hasn't been confirmed by a live import
+   yet, so check it: open the item ID you noted. If it now has the bare key
+   `certinext.domains.total` and its pre-upgrade values, history carried
+   over. If the ID no longer exists, history restarted; nothing else is
+   lost. The `[sandbox]` items and their history are deleted either way.
+
+### Path A: keep the existing host
+
+3. **Turn the existing host into the prod host.** `{$CERTINEXT.ENV}`
+   defaults to `prod`, so it needs no macro. Add an **agent interface**
+   pointing at the pusher machine if the host doesn't have one (it does
+   if the host *is* the pusher machine with an agent template linked), and
+   set `{$CERTINEXT.PERSIST.EXPECTED}`. Existing host macros, such as
+   `{$CERTINEXT.SENDER.ALLOWED}` and threshold overrides, keep working:
+   no macro was renamed.
+4. **Review the DCV-threshold overrides.** If you raised or disabled the
+   `{$CERTINEXT.DCV.*_DAYS}` macros on the host to quiet 0.1.x WARNINGs on
+   SSL.com dns-persist domains, delete those overrides: persist domains no
+   longer reach those triggers
+   ([ADR 0014](adr/0014-dns-persist-checked-by-zabbix-agent.md)).
+   Overrides equal to the new defaults (3/2/1/0) are redundant, and
+   harmless either way.
+5. **If you monitor the sandbox**, create its new host as in
+   [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too),
+   step 1. It starts with none of the old host's macros. Set
+   `{$CERTINEXT.ENV}` = `sandbox`, the sandbox's own
+   `{$CERTINEXT.PERSIST.EXPECTED}`, and `{$CERTINEXT.SENDER.ALLOWED}`
+   (copy the old host's value; 0.1.x installs set it there as a host
+   override). If your sandbox action condition matches a literal `env` tag,
+   it keeps working: the tag value is still `sandbox`.
+
+### Path B: fresh hosts
+
+3. **Create `CertiNext prod`** (and `CertiNext sandbox`, if you monitor it)
+   as in [One-time Zabbix server setup](#one-time-zabbix-server-setup-not-a-playbook-task)
+   steps 2–3. Each needs an agent interface pointing at the pusher machine,
+   the same *Monitored by* as the trapper sends, the template linked, and
+   all three macros: `{$CERTINEXT.ENV}`, `{$CERTINEXT.PERSIST.EXPECTED}`
+   and `{$CERTINEXT.SENDER.ALLOWED}` (copy the old host's value). Carry
+   over any threshold overrides you still want; the old host's macros don't
+   move.
+4. Leave the old host linked for now. Step 9 clears it once the new hosts
+   are verified.
+
+### Both paths: upgrade the pusher and verify
+
+6. **Upgrade the pusher**: run the prepared configuration-management
+   change, or re-run [Install](#install) step 3 pinned to 0.2.0 and set
+   `ZABBIX_HOSTNAME` in each environment's env file (Path A: the sandbox
+   only; Path B: both). Under 0.1.x both environments sent to the same
+   host name, so a sandbox env file left unchanged lands on the prod host
+   and raises its misroute trigger.
+7. **Start the timers again**: `systemctl start 'certinext-zabbix-push*.timer'`
+   (or let the configuration-management run enable them).
+8. **Verify:** start each environment's daily unit once
+   (`systemctl start certinext-zabbix-push-expiry.service`, plus the
+   sandbox's), then check in Zabbix that:
+   - `certinext.env` reads the right environment on each host;
+   - the discovery rule created `certinext.dcv.persist_apexes` × 3
+     `net.dns.record` items;
+   - no *pusher data from the wrong environment* or *dns-persist record
+     missing* problem is open once the first lookups have run (about
+     15 minutes for the local one).
+9. **Path B only: clear the old host.** After step 2's history check is
+   recorded and step 8 passes, *Unlink and clear* **CertiNext DCV by
+   Zabbix trapper** from the old host. That deletes its CertiNext items,
+   their history and any open CertiNext problems on it. Other templates on
+   the host are untouched.
+
+### New alerts after upgrading
+
+0.2.0 adds triggers that 0.1.x never had, and some can open on the first
+run:
+
+| Trigger | Opens at once when |
+| --- | --- |
+| pusher data from the wrong environment (HIGH) | a run reaches a host whose `{$CERTINEXT.ENV}` doesn't match: an unchanged sandbox `ZABBIX_HOSTNAME`, or a sandbox host left at the `prod` default |
+| dns-persist record missing for `{#APEX}` (HIGH, per apex) | `{$CERTINEXT.PERSIST.EXPECTED}` is unset (`CONFIGURE-ME`) or wrong, or the record really is gone |
+| dns-persist record not visible publicly / lookup failing (AVERAGE, per apex) | outbound DNS to the public resolvers is blocked, or the agent can't run the lookup |
+| no certificate issued for over `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` days (WARNING) | the account issues less often than the macro (default 30 days): typical of a sandbox. The item existed in 0.1.x, but the trigger didn't |
+| dns-persist reuse period lapsed (INFORMATION) | the SSL.com reuse window has passed; informational by design |
+| dns-persist apex count dropped (WARNING) | not on day one; only after an apex leaves the discovery list |
 
 ## Validation
 
@@ -506,10 +686,18 @@ journalctl -u certinext-zabbix-push.service -o cat --since -10m
 ```
 
 In Zabbix, *Monitoring → Latest data* for the host should show fresh
-values for `certinext.domains.total[prod]` and
-`certinext.domains.unverified[prod]`.
+values for `certinext.env`, `certinext.domains.total` and
+`certinext.domains.unverified`.
 A `"Zabbix rejected item values"` error means the host name, template
-link, or the `{$CERTINEXT.SENDER.ALLOWED}` macro doesn't match.
+link, or the `{$CERTINEXT.SENDER.ALLOWED}` macro doesn't match (or a
+0.1.x template is still in place — see
+[Upgrading from 0.1.x](#upgrading-from-01x)).
+
+After the first daily run, the host should also have three
+`net.dns.record[…_validation-persist.<apex>,TXT]` items per dns-persist
+apex, each returning a line that contains your expected value in quotes.
+To check one lookup by hand from the Zabbix server or proxy:
+`zabbix_get -s <pusher machine> -k 'net.dns.record[,_validation-persist.example.edu,TXT]'`.
 
 ## Proxies and proxy groups
 
@@ -566,6 +754,8 @@ The full recursion is recoverable from the debug log — see
 | `us-api.certinext.io` | 443 | outbound | CertiNext API + OAuth token endpoint (proxy-able via `HTTPS_PROXY`) |
 | `sandbox-us-api.certinext.io` | 443 | outbound | Only when running with `--sandbox` |
 | Your Zabbix server or proxy | 10051 | outbound | `certinext-zabbix-push` trapper sends (same port an active-mode Zabbix agent uses) — see [Proxies and proxy groups](#proxies-and-proxy-groups) |
+| From your Zabbix server or proxy | 10050 | inbound | Passive agent checks of the dns-persist TXT records (the hosts' agent interfaces point at this machine) |
+| `{$CERTINEXT.DNS.RESOLVER.1}` / `RESOLVER.2` (default 1.1.1.1 / 8.8.8.8) | 53 | outbound | The agent's "visible publicly" lookups; the local lookups use this machine's own resolver |
 
 ## Configuration-management checklist
 
@@ -585,13 +775,25 @@ parentheses):
    `/var/log/certinext-zabbix/` (`file`, `state: directory`, owned by
    `certinextzbx`, mode `0750`) and a `logrotate` policy for it — this
    repo does not rotate the file itself.
-5. Install the four unit files (`copy`/`template` into
-   `/etc/systemd/system/`): the `certinext-zabbix-push` and
+5. Install the six unit files (`copy`/`template` into
+   `/etc/systemd/system/`): the `certinext-zabbix-push`,
+   `certinext-zabbix-push-order-health` and
    `certinext-zabbix-push-expiry` timer/service pairs. Then
-   `systemd: daemon_reload: true`.
-6. Enable + start the two **timers** — not the services (`systemd`,
+   `systemd: daemon_reload: true`. For sandbox monitoring, a second set
+   with its own env file (which sets the sandbox `ZABBIX_HOSTNAME`).
+   A role written for 0.1.x very likely renders one `ZABBIX_HOSTNAME` into
+   both env files. Bumping it to 0.2.0 without separating them sends
+   sandbox data to the prod host, and nothing reports it until the
+   misroute trigger fires. Guard it: assert that the sandbox
+   `ZABBIX_HOSTNAME` differs from prod's whenever the pin is ≥ 0.2.0 and
+   sandbox is enabled (`assert`).
+6. Enable + start the three **timers** — not the services (`systemd`,
    `name: certinext-zabbix-push.timer`, `enabled: true`,
-   `state: started`; same for `certinext-zabbix-push-expiry.timer`).
+   `state: started`; same for the `-order-health` and `-expiry` timers).
+   The machine also needs a Zabbix agent reachable by the server or proxy,
+   and outbound DNS to the two public resolvers (see
+   [Network requirements](#network-requirements)); in most estates the
+   agent is already managed by its own role.
 7. Optional verification task: the `--dry-run` command from
    [Validation](#validation) as a `command` task with
    `changed_when: false`.
@@ -600,9 +802,18 @@ parentheses):
    need `daemon_reload` (units) — nothing to restart.
 
 Facts a playbook must parameterize: the version pin, the two credential
-values, any `ZABBIX_*` overrides, and the two timer schedules.
+values, `ZABBIX_HOSTNAME` and `CERTINEXT_VALIDATED_BY` per environment,
+any other `ZABBIX_*` overrides, and the three timer schedules.
+
+Run the pusher on **exactly one machine per environment**. Each
+environment's Zabbix host has a fixed name
+([ADR 0013](adr/0013-one-zabbix-host-per-certinext-environment.md)), so
+two machines in the same inventory group would both push to it. Its agent
+interface would also cover only one of them. Under 0.1.x, host names
+defaulted to each machine's FQDN, which hid this.
 
 Out of playbook scope (one-time, done in the Zabbix UI): importing
-`templates/template_certinext/7.0/template_certinext.yaml` and linking
-**CertiNext DCV by Zabbix trapper** to the host — see
+`templates/template_certinext/7.0/template_certinext.yaml`, creating one
+host per environment with its agent interface and host macros, and linking
+**CertiNext DCV by Zabbix trapper** to each — see
 [One-time Zabbix server setup](#one-time-zabbix-server-setup-not-a-playbook-task).

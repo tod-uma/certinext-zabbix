@@ -5,7 +5,9 @@ time, so the metric math is deterministic and offline. The trapper send is
 covered by patching the Sender class — no sockets are opened.
 """
 
+import json
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,9 +18,10 @@ from certinext.models.domains import Domain
 from certinext.orders import OrderRecord
 from zabbix_utils.exceptions import ProcessingError
 
+from certinext_zabbix import zabbix_push
 from certinext_zabbix.zabbix_push import (
-    ENV_PROD,
-    ENV_SANDBOX,
+    DCV_METHOD_PERSIST,
+    KEY_ENV,
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
     KEY_ORDERS_DAYS_SINCE_ISSUED,
@@ -26,6 +29,10 @@ from certinext_zabbix.zabbix_push import (
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_UNDOWNLOADED,
     KEY_ORDERS_UNISSUED,
+    KEY_PERSIST_APEXES,
+    KEY_PERSIST_DISCOVERY,
+    KEY_PERSIST_MIN_DAYS_LEFT,
+    KEY_TOKEN_DOMAINS,
     KEY_TOTAL,
     KEY_UNVERIFIED,
     DomainScope,
@@ -34,8 +41,10 @@ from certinext_zabbix.zabbix_push import (
     collect_domain_metrics,
     collect_expiry_metrics,
     collect_order_metrics,
+    fetch_dcv_methods,
     fetch_orders,
-    item_key,
+    persist_apex_names,
+    persist_discovery_value,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -76,12 +85,25 @@ def _domain(
     return Domain.from_payload(None, payload)
 
 
-class TestItemKey:
-    """Environment parameterization of the item keys."""
+class TestBareKeys:
+    """Item keys carry no [env] parameter: each environment has its own host.
 
-    def test_prod_and_sandbox_keys(self) -> None:
-        assert item_key(KEY_TOTAL, ENV_PROD) == "certinext.domains.total[prod]"
-        assert item_key(KEY_TOTAL, ENV_SANDBOX) == "certinext.domains.total[sandbox]"
+    Zabbix's trapper does not expand macros in item keys, so the
+    environment cannot be a key parameter the template fills in; it moved
+    to the target host and the certinext.env misroute guard.
+    """
+
+    def test_no_key_has_a_parameter(self) -> None:
+        keys = [v for k, v in vars(zabbix_push).items() if k.startswith("KEY_")]
+        assert keys, "no KEY_* constants found"
+        assert all("[" not in key for key in keys), keys
+
+    def test_new_keys(self) -> None:
+        assert KEY_ENV == "certinext.env"
+        assert KEY_PERSIST_DISCOVERY == "certinext.dcv.persist.discovery"
+        assert KEY_TOKEN_DOMAINS == "certinext.dcv.token_domains"
+        assert KEY_PERSIST_MIN_DAYS_LEFT == "certinext.dcv.persist_min_days_left"
+        assert KEY_PERSIST_APEXES == "certinext.dcv.persist_apexes"
 
 
 class TestCollectDomainMetrics:
@@ -95,25 +117,18 @@ class TestCollectDomainMetrics:
             _domain("inactive.edu", status="INACTIVE", dcv_status="PENDING"),
             _domain("expired.edu", status="EXPIRED", dcv_status="VERIFIED"),
         ]
-        metrics = collect_domain_metrics(domains, ENV_PROD)
+        metrics = collect_domain_metrics(domains)
         # Only ACTIVE + not-VERIFIED counts as unverified (needs_dcv);
         # the INACTIVE pending domain does not.
         assert metrics == {
-            "certinext.domains.total[prod]": 5,
-            "certinext.domains.unverified[prod]": 2,
-        }
-
-    def test_sandbox_env_reaches_keys(self) -> None:
-        metrics = collect_domain_metrics([_domain("verified.edu")], ENV_SANDBOX)
-        assert metrics == {
-            "certinext.domains.total[sandbox]": 1,
-            "certinext.domains.unverified[sandbox]": 0,
+            "certinext.domains.total": 5,
+            "certinext.domains.unverified": 2,
         }
 
     def test_empty_list_is_visible_as_zero_total(self) -> None:
-        assert collect_domain_metrics([], ENV_PROD) == {
-            "certinext.domains.total[prod]": 0,
-            "certinext.domains.unverified[prod]": 0,
+        assert collect_domain_metrics([]) == {
+            "certinext.domains.total": 0,
+            "certinext.domains.unverified": 0,
         }
 
 
@@ -131,33 +146,143 @@ class TestVerifiedDomains:
 
 
 class TestCollectExpiryMetrics:
-    """Expiring count and min-days-left from refreshed verified domains."""
+    """Expiry metrics, measured separately for token and persist domains."""
 
     def test_expiring_window_and_min_days(self) -> None:
-        verified = [
+        token = [
             _domain("soon.edu", valid_till="2026-07-18T12:00:00Z"),      # +5d → expiring
             _domain("later.edu", valid_till="2026-08-22T12:00:00Z"),     # +40d → fine
             _domain("lapsed.edu", valid_till="2026-07-12T12:00:00Z"),    # -1d → expiring
             _domain("unknown.edu"),                                      # no validTill → excluded
         ]
-        metrics = collect_expiry_metrics(verified, 14, ENV_PROD, now=_NOW)
-        assert metrics[item_key(KEY_EXPIRING, ENV_PROD)] == 2
-        assert metrics[item_key(KEY_MIN_DAYS_LEFT, ENV_PROD)] == -1.0
+        metrics = collect_expiry_metrics(token, [], 14, now=_NOW)
+        assert metrics[KEY_EXPIRING] == 2
+        assert metrics[KEY_MIN_DAYS_LEFT] == -1.0
+        # unknown.edu has no expiry, so it is not part of min_days_left's set.
+        assert metrics[KEY_TOKEN_DOMAINS] == 3
+        assert KEY_PERSIST_MIN_DAYS_LEFT not in metrics
 
     def test_boundary_day_counts_as_expiring(self) -> None:
-        verified = [_domain("edge.edu", valid_till="2026-07-27T12:00:00Z")]  # exactly +14d
-        metrics = collect_expiry_metrics(verified, 14, ENV_PROD, now=_NOW)
-        assert metrics[item_key(KEY_EXPIRING, ENV_PROD)] == 1
-        assert metrics[item_key(KEY_MIN_DAYS_LEFT, ENV_PROD)] == 14.0
+        token = [_domain("edge.edu", valid_till="2026-07-27T12:00:00Z")]  # exactly +14d
+        metrics = collect_expiry_metrics(token, [], 14, now=_NOW)
+        assert metrics[KEY_EXPIRING] == 1
+        assert metrics[KEY_MIN_DAYS_LEFT] == 14.0
 
     def test_no_known_expiries_omits_min_days(self) -> None:
-        metrics = collect_expiry_metrics([_domain("unknown.edu")], 14, ENV_PROD, now=_NOW)
-        assert metrics == {item_key(KEY_EXPIRING, ENV_PROD): 0}
+        metrics = collect_expiry_metrics([_domain("unknown.edu")], [], 14, now=_NOW)
+        assert metrics == {KEY_EXPIRING: 0, KEY_TOKEN_DOMAINS: 0}
 
     def test_no_verified_domains(self) -> None:
-        assert collect_expiry_metrics([], 14, ENV_SANDBOX, now=_NOW) == {
-            "certinext.dcv.expiring[sandbox]": 0,
+        assert collect_expiry_metrics([], [], 14, now=_NOW) == {
+            "certinext.dcv.expiring": 0,
+            "certinext.dcv.token_domains": 0,
         }
+
+    def test_persist_domains_never_count_as_expiring(self) -> None:
+        # A persist domain's validTill is a ~10-day reuse clock; lapsing is
+        # routine, so it must not feed the token expiring/min-days triggers.
+        token = [_domain("token.edu", valid_till="2026-08-22T12:00:00Z")]     # +40d
+        persist = [
+            _domain("persist-a.edu", valid_till="2026-07-12T12:00:00Z"),       # -1d
+            _domain("persist-b.edu", valid_till="2026-07-15T12:00:00Z"),       # +2d
+        ]
+        metrics = collect_expiry_metrics(token, persist, 14, now=_NOW)
+        assert metrics[KEY_EXPIRING] == 0
+        assert metrics[KEY_MIN_DAYS_LEFT] == 40.0
+        assert metrics[KEY_TOKEN_DOMAINS] == 1
+        assert metrics[KEY_PERSIST_MIN_DAYS_LEFT] == -1.0
+
+    def test_all_persist_sends_no_token_min_days(self) -> None:
+        # token_domains=0 is what gates the days-left triggers off, so a
+        # stale last() of an old min_days_left cannot keep them firing.
+        persist = [_domain("persist.edu", valid_till="2026-07-15T12:00:00Z")]
+        metrics = collect_expiry_metrics([], persist, 14, now=_NOW)
+        assert metrics == {
+            KEY_EXPIRING: 0,
+            KEY_TOKEN_DOMAINS: 0,
+            KEY_PERSIST_MIN_DAYS_LEFT: 2.0,
+        }
+
+
+def _method_domain(name: str, method: str = "DNS-TXT") -> MagicMock:
+    """Build a mock domain whose ``get_dcv()`` reports *method*.
+
+    Args:
+        name: Domain name.
+        method: Upper-case DCV method returned as ``DcvInfo.method``.
+
+    Returns:
+        A MagicMock with ``name`` and a ``get_dcv`` returning *method*.
+    """
+    domain = MagicMock()
+    domain.name = name
+    domain.get_dcv.return_value = SimpleNamespace(method=method)
+    return domain
+
+
+class TestFetchDcvMethods:
+    """Splitting the scoped domains by DCV method via get_dcv()."""
+
+    def test_splits_persist_from_every_token_method(self) -> None:
+        persist = _method_domain("persist.edu", DCV_METHOD_PERSIST)
+        txt = _method_domain("txt.edu", "DNS-TXT")
+        http = _method_domain("http.edu", "HTTP-URL")
+        cname = _method_domain("cname.edu", "DNS-CNAME")
+        split = fetch_dcv_methods([txt, persist, http, cname])
+        assert split.persist == [persist]
+        assert split.token == [txt, http, cname]
+        assert split.failed == []
+
+    def test_retries_transient_failure_then_succeeds(self) -> None:
+        flaky = _method_domain("flaky.edu", DCV_METHOD_PERSIST)
+        flaky.get_dcv.side_effect = [
+            httpx.ReadTimeout("timed out"), SimpleNamespace(method=DCV_METHOD_PERSIST),
+        ]
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            split = fetch_dcv_methods([flaky], retry_delay=5.0)
+        assert split.persist == [flaky]
+        assert flaky.get_dcv.call_count == 2
+        mock_sleep.assert_called_once_with(5.0)
+
+    def test_exhausted_retries_land_in_failed_and_the_rest_continue(self) -> None:
+        bad = _method_domain("bad.edu")
+        bad.get_dcv.side_effect = CertiNextAPIError(503, "service unavailable")
+        good = _method_domain("good.edu", DCV_METHOD_PERSIST)
+        with patch("certinext_zabbix.zabbix_push.time.sleep"):
+            split = fetch_dcv_methods([bad, good], attempts=2)
+        assert split.failed == [bad]
+        assert bad.get_dcv.call_count == 2
+        assert split.persist == [good]
+
+    def test_unexpected_error_is_not_retried_but_still_failed(self) -> None:
+        weird = _method_domain("weird.edu")
+        weird.get_dcv.side_effect = RuntimeError("surprise")
+        with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
+            split = fetch_dcv_methods([weird])
+        assert split.failed == [weird]
+        assert weird.get_dcv.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+class TestPersistDiscoveryValue:
+    """The LLD JSON the template's {#APEX} prototypes are built from."""
+
+    def test_sorted_deduplicated_rows(self) -> None:
+        value = persist_discovery_value([
+            _domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu"),
+        ])
+        assert json.loads(value) == [{"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"}]
+
+    def test_empty_is_an_empty_array(self) -> None:
+        # [] is a complete answer ("no persist domains"), not a missing one.
+        assert persist_discovery_value([]) == "[]"
+
+    def test_apex_names_match_discovery_rows(self) -> None:
+        # The apex-count metric is len() of these, so it must equal the rows.
+        persist = [_domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu")]
+        names = persist_apex_names(persist)
+        assert names == ["a.example.edu", "b.example.edu"]
+        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(persist))] == names
 
 
 def _order(
@@ -299,9 +424,9 @@ class TestBucketOrders:
         now = datetime(2026, 8, 17, tzinfo=timezone.utc)
         buckets = bucket_orders([_order("Order Cancelled", order_date="2026-08-16T00:00:00")])
         metrics = collect_order_metrics(
-            buckets, ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=now,
+            buckets, failing_lookback_days=30, cert_expiry_days=30, now=now,
         )
-        assert metrics["certinext.orders.failed_recent[prod]"] == 0
+        assert metrics["certinext.orders.failed_recent"] == 0
 
     def test_unrecognized_status_counts_as_failed(self) -> None:
         # Rejected/expired/revoked orders have never been observed live, so
@@ -358,10 +483,10 @@ class TestCollectOrderMetrics:
                 unissued=[_order(), _order()],
                 undownloaded=[_order(certificate_expiry_date="2027-01-01T00:00:00")],
             ),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_UNISSUED, ENV_PROD)] == 2
-        assert metrics[item_key(KEY_ORDERS_UNDOWNLOADED, ENV_PROD)] == 1
+        assert metrics[KEY_ORDERS_UNISSUED] == 2
+        assert metrics[KEY_ORDERS_UNDOWNLOADED] == 1
 
     def test_failed_recent_excludes_orders_outside_lookback(self) -> None:
         failed = [
@@ -370,17 +495,17 @@ class TestCollectOrderMetrics:
         ]
         metrics = collect_order_metrics(
             _buckets(failed=failed),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+        assert metrics[KEY_ORDERS_FAILED_RECENT] == 1
 
     def test_failed_recent_boundary_day_counts(self) -> None:
         failed = [_order(order_date="2026-06-13T12:00:00")]  # exactly 30d before _NOW
         metrics = collect_order_metrics(
             _buckets(failed=failed),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_FAILED_RECENT, ENV_PROD)] == 1
+        assert metrics[KEY_ORDERS_FAILED_RECENT] == 1
 
     def test_days_since_issued_uses_max_order_date(self) -> None:
         issued = [
@@ -389,9 +514,9 @@ class TestCollectOrderMetrics:
         ]
         metrics = collect_order_metrics(
             _buckets(issued=issued),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
+        assert metrics[KEY_ORDERS_DAYS_SINCE_ISSUED] == 3.0
 
     def test_days_since_issued_counts_undownloaded_certs_too(self) -> None:
         # The CA issued it; nobody fetched it. That still proves issuance is
@@ -401,41 +526,41 @@ class TestCollectOrderMetrics:
                 issued=[_order(order_date="2026-07-01T12:00:00")],       # 12d ago
                 undownloaded=[_order(order_date="2026-07-10T12:00:00")],  # 3d ago
             ),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == 3.0
+        assert metrics[KEY_ORDERS_DAYS_SINCE_ISSUED] == 3.0
 
     def test_no_issued_orders_omits_days_since_issued(self) -> None:
         metrics = collect_order_metrics(
-            _buckets(), ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            _buckets(), failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+        assert KEY_ORDERS_DAYS_SINCE_ISSUED not in metrics
 
     def test_issued_order_with_no_order_date_is_excluded(self) -> None:
         metrics = collect_order_metrics(
             _buckets(issued=[_order()]),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
-        assert item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD) not in metrics
+        assert KEY_ORDERS_DAYS_SINCE_ISSUED not in metrics
 
-    def test_sandbox_env_reaches_keys(self) -> None:
+    def test_empty_buckets_still_report_every_count(self) -> None:
         metrics = collect_order_metrics(
-            _buckets(), ENV_SANDBOX, failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
+            _buckets(), failing_lookback_days=30, cert_expiry_days=30, now=_NOW,
         )
         assert metrics == {
-            item_key(KEY_ORDERS_UNISSUED, ENV_SANDBOX): 0,
-            item_key(KEY_ORDERS_UNDOWNLOADED, ENV_SANDBOX): 0,
-            item_key(KEY_ORDERS_FAILED_RECENT, ENV_SANDBOX): 0,
-            item_key(KEY_ORDERS_EXPIRING, ENV_SANDBOX): 0,
+            KEY_ORDERS_UNISSUED: 0,
+            KEY_ORDERS_UNDOWNLOADED: 0,
+            KEY_ORDERS_FAILED_RECENT: 0,
+            KEY_ORDERS_EXPIRING: 0,
         }
 
     def test_defaults_now_to_current_time(self) -> None:
         recent = datetime.now(timezone.utc) - timedelta(days=1)
         metrics = collect_order_metrics(
             _buckets(issued=[_order(order_date=recent.isoformat())]),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=30,
+            failing_lookback_days=30, cert_expiry_days=30,
         )
-        assert metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, ENV_PROD)] == pytest.approx(1.0, abs=0.01)
+        assert metrics[KEY_ORDERS_DAYS_SINCE_ISSUED] == pytest.approx(1.0, abs=0.01)
 
     def test_expiring_counts_issued_certs_within_lead_time(self) -> None:
         issued = [
@@ -446,9 +571,9 @@ class TestCollectOrderMetrics:
         ]
         metrics = collect_order_metrics(
             _buckets(issued=issued),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 2
+        assert metrics[KEY_ORDERS_EXPIRING] == 2
 
     def test_expiring_counts_undownloaded_certs_too(self) -> None:
         # An unfetched certificate still expires on the CA's schedule.
@@ -457,17 +582,17 @@ class TestCollectOrderMetrics:
                 issued=[_order(certificate_expiry_date="2026-07-20T12:00:00")],
                 undownloaded=[_order(certificate_expiry_date="2026-07-18T12:00:00")],
             ),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 2
+        assert metrics[KEY_ORDERS_EXPIRING] == 2
 
     def test_expiring_boundary_day_counts(self) -> None:
         issued = [_order(certificate_expiry_date="2026-07-27T12:00:00")]  # exactly +14d
         metrics = collect_order_metrics(
             _buckets(issued=issued),
-            ENV_PROD, failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
+            failing_lookback_days=30, cert_expiry_days=14, now=_NOW,
         )
-        assert metrics[item_key(KEY_ORDERS_EXPIRING, ENV_PROD)] == 1
+        assert metrics[KEY_ORDERS_EXPIRING] == 1
 
 
 class TestPushMetrics:
@@ -479,9 +604,9 @@ class TestPushMetrics:
                    return_value=mock_sender) as mock_cls:
             push_metrics(
                 {
-                    item_key(KEY_UNVERIFIED, ENV_PROD): 3,
-                    item_key(KEY_TOTAL, ENV_PROD): 120,
-                    item_key(KEY_MIN_DAYS_LEFT, ENV_PROD): 20.66,
+                    KEY_UNVERIFIED: 3,
+                    KEY_TOTAL: 120,
+                    KEY_MIN_DAYS_LEFT: 20.66,
                 },
                 zabbix_host="host.example.edu",
                 server="zabbix.example.edu", port=10051,
@@ -489,17 +614,33 @@ class TestPushMetrics:
         mock_cls.assert_called_once_with(server="zabbix.example.edu", port=10051, timeout=10)
         (items,) = mock_sender.send.call_args.args
         assert [(i.host, i.key, i.value) for i in items] == [
-            ("host.example.edu", "certinext.dcv.min_days_left[prod]", "20.66"),
-            ("host.example.edu", "certinext.domains.total[prod]", "120"),
-            ("host.example.edu", "certinext.domains.unverified[prod]", "3"),
+            ("host.example.edu", "certinext.dcv.min_days_left", "20.66"),
+            ("host.example.edu", "certinext.domains.total", "120"),
+            ("host.example.edu", "certinext.domains.unverified", "3"),
         ]
+
+    def test_str_values_sent_verbatim(self) -> None:
+        # The TEXT env item and the LLD JSON must reach Zabbix unchanged —
+        # str() of a str, not a repr() that would add quotes.
+        discovery = '[{"{#APEX}": "example.edu"}]'
+        mock_sender = MagicMock()
+        with patch("certinext_zabbix.zabbix_push.Sender", return_value=mock_sender):
+            push_metrics(
+                {KEY_ENV: "sandbox", KEY_PERSIST_DISCOVERY: discovery},
+                zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
+            )
+        (items,) = mock_sender.send.call_args.args
+        assert {i.key: i.value for i in items} == {
+            "certinext.env": "sandbox",
+            "certinext.dcv.persist.discovery": discovery,
+        }
 
     def test_timeout_forwarded(self) -> None:
         mock_sender = MagicMock()
         with patch("certinext_zabbix.zabbix_push.Sender",
                    return_value=mock_sender) as mock_cls:
             push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
                 timeout=3,
             )
@@ -516,7 +657,7 @@ class TestPushMetricsRetry:
         with patch("certinext_zabbix.zabbix_push.Sender", return_value=mock_sender), \
              patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
             result = push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
             )
         assert result is response
@@ -530,7 +671,7 @@ class TestPushMetricsRetry:
              patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep, \
              pytest.raises(ProcessingError):
             push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
                 attempts=3, retry_delay=0.1,
             )
@@ -544,7 +685,7 @@ class TestPushMetricsRetry:
         with patch("certinext_zabbix.zabbix_push.Sender", return_value=mock_sender), \
              patch("certinext_zabbix.zabbix_push.time.sleep"):
             result = push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
             )
         assert result is response
@@ -564,7 +705,7 @@ class TestPushMetricsRetry:
              patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep, \
              pytest.raises(ProcessingError, match="Redirect loop") as excinfo:
             push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
                 attempts=3, retry_delay=0.1,
             )
@@ -585,7 +726,7 @@ class TestPushMetricsRetry:
         with patch("certinext_zabbix.zabbix_push.Sender", return_value=mock_sender), \
              patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
             result = push_metrics(
-                {item_key(KEY_TOTAL, ENV_PROD): 1},
+                {KEY_TOTAL: 1},
                 zabbix_host="h.example.edu", server="zbx.example.edu", port=10051,
             )
         assert result is response

@@ -1,0 +1,317 @@
+"""Consistency checks between the Zabbix template YAML and the pusher.
+
+The template (``templates/template_certinext/7.0/template_certinext.yaml``)
+is hand-written, and nothing at push time catches a key that exists on one
+side only: Zabbix just rejects the value. These tests parse the YAML and
+check it against the ``KEY_*`` constants in
+:mod:`certinext_zabbix.zabbix_push`, plus the structural mistakes that make
+a hand-written template fail to import (undefined macros, dangling trigger
+dependencies, malformed UUIDs).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import yaml
+
+from certinext_zabbix import zabbix_push
+
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "templates" / "template_certinext" / "7.0" / "template_certinext.yaml"
+)
+TEMPLATE_NAME = "CertiNext DCV by Zabbix trapper"
+SENDER_MACRO = "{$CERTINEXT.SENDER.ALLOWED}"
+
+#: Matches a user macro, capturing its name without any ``:context``.
+_MACRO_RE = re.compile(r"\{\$([A-Z0-9_.]+)(?::[^}]*)?\}")
+#: Matches an LLD macro such as ``{#APEX}``.
+_LLD_MACRO_RE = re.compile(r"\{#[A-Z0-9_.]+\}")
+#: Matches the item key in a trigger function's ``/host/key`` reference.
+_ITEM_REF_RE = re.compile(r"/" + re.escape(TEMPLATE_NAME) + r"/([a-z0-9_.]+(?:\[[^\]]*\])?)")
+
+
+@pytest.fixture(scope="module")
+def export() -> dict[str, Any]:
+    """Parse the import file once per module.
+
+    Returns:
+        The ``zabbix_export`` mapping.
+    """
+    with TEMPLATE_PATH.open(encoding="utf-8") as fh:
+        parsed: dict[str, Any] = yaml.safe_load(fh)["zabbix_export"]
+    return parsed
+
+
+@pytest.fixture(scope="module")
+def template(export: dict[str, Any]) -> dict[str, Any]:
+    """Return the single template definition from the import file.
+
+    Args:
+        export: The parsed ``zabbix_export`` mapping.
+
+    Returns:
+        The one entry of ``zabbix_export.templates``.
+    """
+    assert len(export["templates"]) == 1
+    tpl: dict[str, Any] = export["templates"][0]
+    return tpl
+
+
+def _push_keys() -> dict[str, str]:
+    """Collect the ``KEY_*`` constants the pusher sends.
+
+    Returns:
+        Mapping of constant name to item key.
+    """
+    return {
+        name: value
+        for name, value in vars(zabbix_push).items()
+        if name.startswith("KEY_") and isinstance(value, str)
+    }
+
+
+def _discovery_rules(tpl: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the template's discovery rules (an empty list if none).
+
+    Args:
+        tpl: The template definition.
+
+    Returns:
+        The ``discovery_rules`` entries.
+    """
+    rules: list[dict[str, Any]] = tpl.get("discovery_rules", [])
+    return rules
+
+
+def _all_triggers(export: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Yield every trigger and trigger prototype in the import file.
+
+    Covers single-item triggers nested under items and item prototypes,
+    multi-item trigger prototypes on a discovery rule, and the top-level
+    multi-item ``triggers`` list.
+
+    Args:
+        export: The parsed ``zabbix_export`` mapping.
+
+    Yields:
+        Each trigger or trigger-prototype mapping.
+    """
+    tpl = export["templates"][0]
+    for item in tpl.get("items", []):
+        yield from item.get("triggers", [])
+    for rule in _discovery_rules(tpl):
+        for proto in rule.get("item_prototypes", []):
+            yield from proto.get("trigger_prototypes", [])
+        yield from rule.get("trigger_prototypes", [])
+    yield from export.get("triggers", [])
+
+
+def _walk(node: Any) -> Iterator[Any]:
+    """Yield every scalar and mapping in a parsed YAML tree.
+
+    Args:
+        node: Any parsed YAML node.
+
+    Yields:
+        Each nested node, depth first.
+    """
+    yield node
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+
+
+class TestKeySync:
+    """The pusher's ``KEY_*`` constants and the template's trapper keys match."""
+
+    def test_every_push_key_is_in_the_template(self, template: dict[str, Any]) -> None:
+        """Each ``KEY_*`` value is a trapper item key or a discovery rule key."""
+        trap_keys = {i["key"] for i in template["items"] if i["type"] == "TRAP"}
+        rule_keys = {r["key"] for r in _discovery_rules(template) if r["type"] == "TRAP"}
+        missing = {n: k for n, k in _push_keys().items() if k not in trap_keys | rule_keys}
+        assert not missing, f"KEY_* constants with no trapper item/rule in the template: {missing}"
+
+    def test_every_trapper_key_has_a_push_constant(self, template: dict[str, Any]) -> None:
+        """No trapper item or rule waits for a key the pusher never sends."""
+        sent = set(_push_keys().values())
+        trap_keys = {i["key"] for i in template["items"] if i["type"] == "TRAP"}
+        trap_keys |= {r["key"] for r in _discovery_rules(template) if r["type"] == "TRAP"}
+        assert not trap_keys - sent, f"template trapper keys with no KEY_* constant: {trap_keys - sent}"
+
+    def test_trapper_keys_are_bare(self, template: dict[str, Any]) -> None:
+        """Trapper keys carry no parameter: the trapper does not expand macros in keys."""
+        bracketed = [i["key"] for i in template["items"] if i["type"] == "TRAP" and "[" in i["key"]]
+        assert not bracketed
+
+    def test_persist_discovery_is_a_discovery_rule(self, template: dict[str, Any]) -> None:
+        """The apex list feeds an LLD rule, not a plain item."""
+        rule_keys = [r["key"] for r in _discovery_rules(template)]
+        assert zabbix_push.KEY_PERSIST_DISCOVERY in rule_keys
+
+    def test_trappers_restrict_senders(self, template: dict[str, Any]) -> None:
+        """Every trapper item and rule sets allowed_hosts (empty rejects all senders)."""
+        trappers = [i for i in template["items"] if i["type"] == "TRAP"]
+        trappers += [r for r in _discovery_rules(template) if r["type"] == "TRAP"]
+        assert all(t.get("allowed_hosts") == SENDER_MACRO for t in trappers)
+
+
+class TestMacros:
+    """Template macros are defined, and the new ones exist with safe defaults."""
+
+    @pytest.mark.parametrize("name", [
+        "{$CERTINEXT.ENV}",
+        "{$CERTINEXT.PERSIST.EXPECTED}",
+        "{$CERTINEXT.DNS.RESOLVER.1}",
+        "{$CERTINEXT.DNS.RESOLVER.2}",
+        "{$CERTINEXT.DNS.INTERVAL.LOCAL}",
+        "{$CERTINEXT.DNS.INTERVAL.EXTERNAL}",
+        "{$CERTINEXT.DNS.NODATA}",
+        "{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}",
+    ])
+    def test_new_macro_defined(self, template: dict[str, Any], name: str) -> None:
+        """Each macro this change introduced is declared on the template."""
+        assert name in {m["macro"] for m in template["macros"]}
+
+    def test_every_referenced_macro_is_defined(
+        self, export: dict[str, Any], template: dict[str, Any],
+    ) -> None:
+        """No name, key, expression or description uses an undeclared macro."""
+        defined = {m["macro"][2:-1] for m in template["macros"]}
+        used = {
+            m.group(1)
+            for node in _walk(export) if isinstance(node, str)
+            for m in _MACRO_RE.finditer(node)
+        }
+        assert not used - defined, f"undeclared macros: {used - defined}"
+
+    def test_persist_expected_fails_closed(self, template: dict[str, Any]) -> None:
+        """The committed default matches no real record (the repo mirrors publicly)."""
+        macros = {m["macro"]: m["value"] for m in template["macros"]}
+        assert macros["{$CERTINEXT.PERSIST.EXPECTED}"] == "CONFIGURE-ME"
+
+    def test_macros_sorted(self, template: dict[str, Any]) -> None:
+        """Macros are in Zabbix's export order, so a re-import doesn't report a change."""
+        names = [m["macro"] for m in template["macros"]]
+        assert names == sorted(names)
+
+
+class TestTriggers:
+    """Trigger expressions and dependencies resolve against this template."""
+
+    def test_expressions_reference_existing_keys(
+        self, export: dict[str, Any], template: dict[str, Any],
+    ) -> None:
+        """Every ``/template/key`` in an expression is an item or item prototype."""
+        keys = {i["key"] for i in template["items"]}
+        for rule in _discovery_rules(template):
+            keys |= {p["key"] for p in rule.get("item_prototypes", [])}
+        for trig in _all_triggers(export):
+            refs = _ITEM_REF_RE.findall(trig["expression"])
+            assert refs, f"no item reference in {trig['name']!r}"
+            assert set(refs) <= keys, f"{trig['name']!r} references unknown keys {set(refs) - keys}"
+
+    def test_dependencies_match_a_trigger(self, export: dict[str, Any]) -> None:
+        """Each dependency's name and expression match a defined trigger exactly."""
+        defined = {(t["name"], t["expression"]) for t in _all_triggers(export)}
+        for trig in _all_triggers(export):
+            for dep in trig.get("dependencies", []):
+                assert (dep["name"], dep["expression"]) in defined, f"dangling dependency in {trig['name']!r}"
+
+    def test_days_left_triggers_gated_on_token_domains(self, export: dict[str, Any]) -> None:
+        """Every min_days_left trigger also requires token_domains > 0."""
+        gated = [t for t in _all_triggers(export) if zabbix_push.KEY_MIN_DAYS_LEFT + ")" in t["expression"]]
+        assert len(gated) == 4
+        gate = f"last(/{TEMPLATE_NAME}/{zabbix_push.KEY_TOKEN_DOMAINS})>0"
+        assert all(gate in t["expression"] for t in gated)
+
+    def test_misroute_guard_compares_env(self, export: dict[str, Any]) -> None:
+        """A run sent to the wrong environment's host raises a HIGH problem."""
+        guard = [
+            t for t in _all_triggers(export)
+            if f"/{zabbix_push.KEY_ENV})" in t["expression"]
+        ]
+        assert len(guard) == 1
+        assert '<>"{$CERTINEXT.ENV}"' in guard[0]["expression"]
+        assert guard[0]["priority"] == "HIGH"
+
+
+class TestStructure:
+    """Import-file details that Zabbix enforces on a hand-written file."""
+
+    def test_uuids_are_unique_and_well_formed(self, export: dict[str, Any]) -> None:
+        """Every uuid is 32 lowercase hex characters and appears once."""
+        uuids = [n["uuid"] for n in _walk(export) if isinstance(n, dict) and "uuid" in n]
+        assert all(re.fullmatch(r"[0-9a-f]{32}", u) for u in uuids)
+        assert len(uuids) == len(set(uuids))
+
+    def test_everything_has_a_uuid(
+        self, export: dict[str, Any], template: dict[str, Any],
+    ) -> None:
+        """Items, triggers, rules and prototypes all carry a uuid."""
+        nodes: list[dict[str, Any]] = [*template["items"], *_all_triggers(export)]
+        for rule in _discovery_rules(template):
+            nodes += [rule, *rule.get("item_prototypes", [])]
+        assert all("uuid" in n for n in nodes)
+
+    def test_lost_apexes_deleted_not_disabled(self, template: dict[str, Any]) -> None:
+        """The persist rule keeps lost apexes enabled and deletes them after 3 days."""
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        assert rule["lifetime"] == "3d"
+        assert rule["enabled_lifetime_type"] == "DISABLE_NEVER"
+
+    def test_missing_record_maps_to_empty_value(self, template: dict[str, Any]) -> None:
+        """Only "Cannot perform DNS query" becomes "": scope 0 = error matches (7.0 API).
+
+        Scope 1 would invert it: a missing record stays unsupported while a
+        resolver timeout reads as a missing record (Codex R1 finding 1).
+        """
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        for proto in rule["item_prototypes"]:
+            (step,) = proto["preprocessing"]
+            assert step["type"] == "CHECK_NOT_SUPPORTED"
+            assert step["parameters"] == ["0", "^Cannot perform DNS query"]
+            assert step["error_handler"] == "CUSTOM_VALUE"
+            assert step["error_handler_params"] == ""
+
+    def test_lld_macros_are_ones_the_pusher_sends(self, template: dict[str, Any]) -> None:
+        """Every {#MACRO} in the persist rule is a column of the pusher's discovery rows."""
+        domain = SimpleNamespace(name="example.edu")
+        row = json.loads(zabbix_push.persist_discovery_value([domain]))[0]  # type: ignore[list-item]
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        used = {m for n in _walk(rule) if isinstance(n, str) for m in _LLD_MACRO_RE.findall(n)}
+        assert used, "no LLD macros found in the persist rule"
+        assert used <= set(row), f"LLD macros the pusher never sends: {used - set(row)}"
+
+    def test_apex_drop_window_outlasts_lifetime(self, template: dict[str, Any]) -> None:
+        """The count-drop trigger looks back further than the rule keeps lost apexes.
+
+        Otherwise a partial list that persists would resolve the problem
+        before Zabbix deletes the missing apexes' checks.
+        """
+        item = next(i for i in template["items"] if i["key"] == zabbix_push.KEY_PERSIST_APEXES)
+        (trig,) = item["triggers"]
+        window = re.search(r"max\(/[^,]+,(\d+)d\)", trig["expression"])
+        assert window, trig["expression"]
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        assert int(window.group(1)) > int(rule["lifetime"].removesuffix("d"))
+
+    def test_persist_prototypes_check_three_resolvers(self, template: dict[str, Any]) -> None:
+        """One local and two external TXT lookups per discovered apex."""
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        keys = sorted(p["key"] for p in rule["item_prototypes"])
+        assert keys == sorted([
+            "net.dns.record[,_validation-persist.{#APEX},TXT]",
+            "net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT]",
+            "net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT]",
+        ])

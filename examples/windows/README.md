@@ -108,7 +108,7 @@ Get-ScheduledTaskInfo -TaskName "CertiNext Zabbix Push"
 ```
 
 In Zabbix, *Monitoring → Latest data* for the host should show fresh
-values for `certinext.domains.total[prod]` and
-`certinext.domains.unverified[prod]` — see the root
+values for `certinext.env`, `certinext.domains.total` and
+`certinext.domains.unverified` — see the root
 [`docs/deployment.md`](../../docs/deployment.md) for the one-time
 Zabbix-side setup shared by every platform.

@@ -21,7 +21,8 @@ an ADR (see [../adr/](../adr/)).
 |----|-------|--------|
 | [IDEA-001](IDEA-001-credential-file-input.md) | Read secrets from systemd `$CREDENTIALS_DIRECTORY` / `_FILE`-suffixed input | Proposed |
 | [IDEA-002](IDEA-002-community-templates-submission.md) | Submit the template to the official Zabbix community-templates repository | Proposed |
-| [IDEA-003](IDEA-003-days-since-issued-alert-threshold.md) | Add a severity trigger for days-since-last-issued once there's a baseline cadence | Proposed |
+| [IDEA-003](IDEA-003-days-since-issued-alert-threshold.md) | Add a severity trigger for days-since-last-issued once there's a baseline cadence | Accepted → implemented in 0.2.0 |
 | [IDEA-004](IDEA-004-stuck-order-domain-visibility-lld.md) | Per-domain visibility into stuck orders via Zabbix LLD | Proposed |
 | [IDEA-005](IDEA-005-originator-alert-severity-bucketing.md) | Bucket order-health alert severity by `originator` (ACME vs. manual) | Proposed |
 | [IDEA-006](IDEA-006-enforce-ruff-format.md) | Run `ruff format` and enforce it in CI | Proposed |
+| [IDEA-007](IDEA-007-token-dcv-record-check-while-pending.md) | Check a token-method DCV record in DNS while its validation is pending | Proposed |

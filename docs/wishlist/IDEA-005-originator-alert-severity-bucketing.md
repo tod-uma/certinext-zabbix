@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Created:** 2026-08-08
-- **Updated:** 2026-08-07
+- **Updated:** 2026-11-18
 
 > **This idea is now a prerequisite, not just an enhancement.**
 > [ADR 0008](../adr/0008-orders-expiring-ships-data-only.md) ships
@@ -126,10 +126,14 @@ approvals, or an ACME client broke and the alert took too long to fire.
 
 ## Open questions & caveats
 
-- Key parameter (`[prod,automated]`) vs. separate key names
+- ~~Key parameter (`[prod,automated]`) vs. separate key names
   (`certinext.orders.unissued_automated[prod]`)? The former composes with
   the existing `[env]` parameter but changes every existing order-health
-  key; the latter avoids touching them.
+  key; the latter avoids touching them.~~ **Answered 2026-11-18 by
+  [ADR 0013](../adr/0013-one-zabbix-host-per-certinext-environment.md):**
+  0.2.0 dropped the `[env]` parameter (one Zabbix host per environment),
+  so keys are bare and a `[automated]`/`[manual]` parameter is now purely
+  additive. The baseline prerequisite (backlog cleared) is still unmet.
 - Is two classes (automated/manual) enough, or does `CERTInext API` want
   its own tier?
 - Where does the mapping live — a CLI flag, an env var, or a config file?

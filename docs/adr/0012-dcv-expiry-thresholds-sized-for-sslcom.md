@@ -1,7 +1,12 @@
 ---
-status: accepted
+status: superseded by 0014
 date: 2026-11-10
 ---
+
+> **Superseded by [ADR 0014](0014-dns-persist-checked-by-zabbix-agent.md)
+> (2026-11-18).** For dns-persist, `validTill` turned out to be a reuse
+> clock, not a deadline. The 3/2/1/0 defaults remain, now for token-method
+> domains only.
 
 # DCV-expiry thresholds default to 3/2/1/0 days, sized for SSL.com
 

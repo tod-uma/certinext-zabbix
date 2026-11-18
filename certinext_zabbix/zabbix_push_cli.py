@@ -18,10 +18,12 @@ Designed for three schedules on the same host:
 ``--validated-by CA`` (env ``CERTINEXT_VALIDATED_BY``) restricts the
 domain and DCV-expiry metrics to one CA's domain records (ADR 0011).
 
-Item keys are parameterized by environment (``[prod]`` / ``[sandbox]``),
-derived from the resolved CertiNext connection — a ``--sandbox`` (or
-sandbox-profile) run pushes into the sandbox items of the same Zabbix
-host, never the prod ones. Locks are per environment *and* per job (plain
+Item keys are bare: each CertiNext environment has its own Zabbix host,
+chosen per run with ``--zabbix-host`` / ``ZABBIX_HOSTNAME``. Every push also
+carries ``certinext.env`` (``prod`` / ``sandbox``, derived from the resolved
+connection, never user-supplied), which the template compares with the
+host's ``{$CERTINEXT.ENV}`` to catch a run sent to the wrong host. Locks are
+per environment *and* per job (plain
 vs. ``--expiry-days`` vs. ``--order-health``), so optional sandbox
 schedules never make prod runs skip a cycle, and one job's run colliding
 with another's slot can't make either one skip the other.
@@ -60,6 +62,7 @@ from certinext.cli_options import (
 )
 from certinext.cli_support import LogFormat, LogMode, build_session, resolve_connection
 from certinext.exceptions import CertiNextAPIError
+from certinext.models.domains import Domain
 from filelock import FileLock, Timeout
 from zabbix_utils.exceptions import ProcessingError
 
@@ -75,6 +78,7 @@ from ._cli_shared import (
 from .zabbix_push import (
     ENV_PROD,
     ENV_SANDBOX,
+    KEY_ENV,
     KEY_EXPIRING,
     KEY_MIN_DAYS_LEFT,
     KEY_ORDERS_DAYS_SINCE_ISSUED,
@@ -82,15 +86,22 @@ from .zabbix_push import (
     KEY_ORDERS_FAILED_RECENT,
     KEY_ORDERS_UNDOWNLOADED,
     KEY_ORDERS_UNISSUED,
+    KEY_PERSIST_APEXES,
+    KEY_PERSIST_DISCOVERY,
+    KEY_PERSIST_MIN_DAYS_LEFT,
+    KEY_TOKEN_DOMAINS,
     KEY_UNVERIFIED,
     DomainScope,
+    MetricValue,
     OrderBuckets,
     bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
     collect_order_metrics,
+    fetch_dcv_methods,
     fetch_orders,
-    item_key,
+    persist_apex_names,
+    persist_discovery_value,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -100,6 +111,42 @@ from .zabbix_push import (
 log = structlog.get_logger()
 
 app = typer.Typer(add_completion=False)
+
+
+def _refresh_any_failed(verified: list[Domain]) -> bool:
+    """Refresh every domain's details, logging each failure once.
+
+    Every domain is attempted even after one fails, so a run's log names
+    all the failing domains rather than only the first.
+
+    Args:
+        verified: ACTIVE+VERIFIED domains to refresh in place.
+
+    Returns:
+        True when at least one refresh failed after retries. The caller
+        must then skip the expiry metrics: a partial refresh would
+        undercount the expiring domains, and a too-low value masks the
+        very condition being monitored.
+    """
+    failed = False
+    for d in verified:
+        try:
+            refresh_domain(d)
+        except (CertiNextAPIError, httpx.HTTPError) as exc:
+            # Expected, well-typed failure mode (timeout, rate limit,
+            # transient API error): one concise line per domain.
+            log_caught_exception(
+                log, "Failed to refresh domain", exc, level="warning", domain=d.name,
+            )
+            failed = True
+        except Exception as exc:
+            # Not a documented failure mode of Domain.refresh(), but
+            # still one concise line per domain, same as above.
+            log_caught_exception(
+                log, "Failed to refresh domain — unexpected error", exc, domain=d.name,
+            )
+            failed = True
+    return failed
 
 
 @app.command()
@@ -140,7 +187,7 @@ def run(
             "per name, so without this every CA's records are counted together. "
             "Affects the domain and DCV-expiry metrics only, not order health. "
             "Unset or empty (the default) monitors every CA, the old behavior. "
-            "Item keys are unchanged: switching CA changes what the [env] items "
+            "Item keys are unchanged: switching CA changes what the items "
             "measure, so expect a step change in their values."
         ),
     )] = None,
@@ -148,9 +195,12 @@ def run(
     expiry_days: Annotated[Optional[int], typer.Option(
         "--expiry-days", metavar="DAYS",
         help=(
-            "Also push the DCV-expiry metrics: verified domains whose DCV expires "
-            "within DAYS days, and the minimum days left. Fetches domain details "
-            "(one API call per verified domain, expensive) — schedule on its own "
+            "Also push the DCV-expiry metrics, split by DCV method: token-method "
+            "domains whose DCV expires within DAYS days and their minimum days "
+            "left; the minimum days left of DNS-PERSIST reuse periods; and the "
+            "LLD list of DNS-PERSIST apexes whose TXT records Zabbix checks. "
+            "Reads every scoped domain's DCV method and every verified domain's "
+            "details (two API calls per domain, expensive) — schedule on its own "
             "daily run, not more often. Disabled by default."
         ),
     )] = None,
@@ -225,9 +275,11 @@ def run(
 ) -> None:
     """Push CertiNext DCV health metrics to Zabbix as trapper item values.
 
-    Always pushes the domain-list metrics (total domains, unverified count);
-    with --expiry-days also fetches per-domain details and pushes the
-    DCV-expiry metrics (expiring count, minimum days left); with
+    Always pushes the domain-list metrics (total domains, unverified count)
+    and the environment name; with --expiry-days also reads each domain's
+    DCV method and details and pushes the DCV-expiry metrics (token-method
+    expiring count and minimum days left, DNS-PERSIST minimum days left,
+    and the DNS-PERSIST apex discovery list); with
     --order-health also fetches the orders report and pushes the
     order-health metrics (awaiting-issuance count, generated-but-never-
     downloaded count, failed-recent count, days since last issued, and
@@ -239,7 +291,7 @@ def run(
     had_errors = False
     sent = False
     env = ENV_PROD
-    metrics: dict[str, int | float] = {}
+    metrics: dict[str, MetricValue] = {}
     resolved_host = zabbix_host or ""
     lock: Optional[FileLock] = None
     try:
@@ -266,9 +318,10 @@ def run(
             profile=profile, sandbox=sandbox, base_url=base_url, token_url=token_url,
         )
         # conn.sandbox also covers profiles configured with sandbox = true,
-        # which a bare --sandbox check would miss. The environment decides
-        # which [env]-parameterized items receive the values — derived, not
-        # user-supplied, so sandbox data can never land in the prod items.
+        # which a bare --sandbox check would miss. Derived, not
+        # user-supplied: it is pushed as certinext.env, and the template's
+        # misroute trigger compares it with the target host's
+        # {$CERTINEXT.ENV}, so sandbox data sent to the prod host alerts.
         env = ENV_SANDBOX if conn.sandbox else ENV_PROD
         # An empty value (e.g. a templated unit file leaving
         # CERTINEXT_VALIDATED_BY="") means unset, not "a CA named ''" —
@@ -334,46 +387,60 @@ def run(
             scope=domain_scope.value, before=len(domains), after=len(scoped_domains),
         )
         domains = scoped_domains
-        metrics.update(collect_domain_metrics(domains, env))
+        metrics.update(collect_domain_metrics(domains))
         log.info(
             "Collected domain metrics",
-            total=len(domains), unverified=metrics[item_key(KEY_UNVERIFIED, env)],
+            total=len(domains), unverified=metrics[KEY_UNVERIFIED],
         )
 
         if expiry_days is not None:
-            verified = verified_domains(domains)
-            log.info("Fetching details to check expiry", count=len(verified))
-            refresh_failed = False
-            for d in verified:
-                try:
-                    refresh_domain(d)
-                except (CertiNextAPIError, httpx.HTTPError) as exc:
-                    # A partial refresh would undercount the expiring domains —
-                    # a too-low value masks the very condition being monitored.
-                    # Push nothing for the expiry items instead; the nodata()
-                    # trigger flags a persistent failure. Expected, well-typed
-                    # failure mode (timeout, rate limit, transient API error).
-                    log_caught_exception(
-                        log, "Failed to refresh domain", exc, level="warning", domain=d.name,
-                    )
-                    refresh_failed = True
-                except Exception as exc:
-                    # Not a documented failure mode of Domain.refresh(), but
-                    # still one concise line per domain, same as above.
-                    log_caught_exception(
-                        log, "Failed to refresh domain — unexpected error", exc, domain=d.name,
-                    )
-                    refresh_failed = True
-            if refresh_failed:
+            log.info("Reading DCV methods", count=len(domains))
+            split = fetch_dcv_methods(domains)
+            log.info(
+                "DCV methods read",
+                persist=len(split.persist), token=len(split.token), failed=len(split.failed),
+            )
+            if split.failed:
+                # A domain with an unknown method is missing from both
+                # halves: the discovery list would drop its apex (Zabbix then
+                # deletes that apex's items) and the token counts would come
+                # out too low. Same skip-rather-than-undercount policy as a
+                # refresh failure; nodata() flags a persistent failure.
                 had_errors = True
-                log.error("Skipping expiry metrics — at least one domain refresh failed")
-            else:
-                metrics.update(collect_expiry_metrics(verified, expiry_days, env))
-                log.info(
-                    "Collected expiry metrics", days=expiry_days,
-                    expiring=metrics[item_key(KEY_EXPIRING, env)],
-                    min_days_left=metrics.get(item_key(KEY_MIN_DAYS_LEFT, env)),
+                log.error(
+                    "Skipping persist discovery and expiry metrics — "
+                    "at least one DCV method read failed",
+                    failed=len(split.failed),
                 )
+            else:
+                # The method split is complete, so the discovery list is
+                # too — send it even if a detail refresh fails below.
+                metrics[KEY_PERSIST_DISCOVERY] = persist_discovery_value(split.persist)
+                # Sent with the list, never without it: the template alerts
+                # when this drops below its recent maximum, which catches a
+                # silently partial domain list before Zabbix deletes the
+                # missing apexes' checks (and a deliberate removal, once).
+                metrics[KEY_PERSIST_APEXES] = len(persist_apex_names(split.persist))
+                token_verified = verified_domains(split.token)
+                persist_verified = verified_domains(split.persist)
+                log.info(
+                    "Fetching details to check expiry",
+                    count=len(token_verified) + len(persist_verified),
+                )
+                if _refresh_any_failed([*token_verified, *persist_verified]):
+                    had_errors = True
+                    log.error("Skipping expiry metrics — at least one domain refresh failed")
+                else:
+                    metrics.update(collect_expiry_metrics(
+                        token_verified, persist_verified, expiry_days,
+                    ))
+                    log.info(
+                        "Collected expiry metrics", days=expiry_days,
+                        expiring=metrics[KEY_EXPIRING],
+                        token_domains=metrics[KEY_TOKEN_DOMAINS],
+                        min_days_left=metrics.get(KEY_MIN_DAYS_LEFT),
+                        persist_min_days_left=metrics.get(KEY_PERSIST_MIN_DAYS_LEFT),
+                    )
 
         if order_health:
             log.info("Fetching orders report for order-health check")
@@ -409,18 +476,23 @@ def run(
                 log.error("Skipping order-health metrics — orders report fetch failed")
             else:
                 metrics.update(collect_order_metrics(
-                    buckets, env,
+                    buckets,
                     failing_lookback_days=order_failing_lookback_days,
                     cert_expiry_days=order_cert_expiry_days,
                 ))
                 log.info(
                     "Collected order-health metrics",
-                    unissued=metrics[item_key(KEY_ORDERS_UNISSUED, env)],
-                    undownloaded=metrics[item_key(KEY_ORDERS_UNDOWNLOADED, env)],
-                    failed_recent=metrics[item_key(KEY_ORDERS_FAILED_RECENT, env)],
-                    expiring=metrics[item_key(KEY_ORDERS_EXPIRING, env)],
-                    days_since_issued=metrics.get(item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, env)),
+                    unissued=metrics[KEY_ORDERS_UNISSUED],
+                    undownloaded=metrics[KEY_ORDERS_UNDOWNLOADED],
+                    failed_recent=metrics[KEY_ORDERS_FAILED_RECENT],
+                    expiring=metrics[KEY_ORDERS_EXPIRING],
+                    days_since_issued=metrics.get(KEY_ORDERS_DAYS_SINCE_ISSUED),
                 )
+
+        # Every run, so the misroute trigger always has a fresh value to
+        # compare. Added last: a run that failed before collecting anything
+        # still exits with no stdout JSON (metrics stays empty).
+        metrics[KEY_ENV] = env
 
         if dry_run:
             log.info("DRY RUN — metrics not sent", count=len(metrics))
