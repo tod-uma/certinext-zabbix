@@ -6,17 +6,23 @@ and wraps the send through the Zabbix sender (trapper) protocol via
 ``zabbix_utils``. The item keys here must match ``CertiNext DCV by Zabbix
 trapper`` on the Zabbix server (source of truth:
 ``templates/template_certinext/7.0/template_certinext.yaml`` in this repo).
-Keys are parameterized by environment (``[prod]`` /
-``[sandbox]``, derived from the resolved connection) so both environments
-can be monitored on the same Zabbix host without colliding.
+Keys are bare (no ``[env]`` parameter): each CertiNext environment has its
+own Zabbix host, and the CLI sends :data:`KEY_ENV` every run so the template
+can catch a run routed to the wrong host. Zabbix's trapper does not expand
+macros in item keys, so the environment cannot live in the key itself
+(docs/plans/env-hosts-dns-persist.md).
 
 Three metric families, matching the three designed checks:
 
 - **Domain-list metrics** (cheap, one API list call): total domain count and
   how many are unverified (ACTIVE but not DCV-VERIFIED). Pushed every run.
-- **Expiry metrics** (one API detail call per verified domain): how many
-  verified domains' DCV expires within the renewal lead time, and the
-  minimum days left. Pushed only when the caller opts in (daily run).
+- **Expiry metrics** (one DCV-method call per scoped domain plus one detail
+  call per verified domain), split by DCV method (:func:`fetch_dcv_methods`):
+  for token-method domains, how many expire within the renewal lead time
+  and the minimum days left; for ``DNS-PERSIST`` domains, only the minimum
+  days left of the reuse period, plus an LLD list of their apexes so Zabbix
+  agent items can check the ``_validation-persist`` TXT record itself.
+  Pushed only when the caller opts in (daily run).
 - **Order-health metrics** (one unfiltered Orders Report list call, split
   client-side by :func:`bucket_orders`): orders the CA never issued a
   certificate for, orders whose certificate was generated but never
@@ -28,6 +34,7 @@ Three metric families, matching the three designed checks:
   server-side ``status`` filter is unusable here.
 """
 
+import json
 import time
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -37,6 +44,7 @@ from typing import NamedTuple
 import httpx
 import structlog
 from certinext import filter_needs_dcv
+from certinext.cli_support import log_caught_exception
 from certinext.exceptions import CertiNextAPIError
 from certinext.models.domains import Domain
 from certinext.orders import OrderAccessor, OrderRecord
@@ -55,9 +63,23 @@ KEY_ORDERS_UNDOWNLOADED = "certinext.orders.undownloaded"
 KEY_ORDERS_FAILED_RECENT = "certinext.orders.failed_recent"
 KEY_ORDERS_DAYS_SINCE_ISSUED = "certinext.orders.days_since_issued"
 KEY_ORDERS_EXPIRING = "certinext.orders.expiring"
+KEY_ENV = "certinext.env"
+KEY_PERSIST_DISCOVERY = "certinext.dcv.persist.discovery"
+KEY_TOKEN_DOMAINS = "certinext.dcv.token_domains"
+KEY_PERSIST_MIN_DAYS_LEFT = "certinext.dcv.persist_min_days_left"
 
 ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
+
+# DcvInfo.method value (upper-cased by certinext) for SSL.com's dns-persist
+# DCV. Every other method is a token method: a one-time challenge whose
+# validTill really is the deadline. A persist domain's validTill is only a
+# reuse clock — the CA re-reads the _validation-persist TXT record at the
+# next issuance — so its record, not its date, is what has to be watched.
+DCV_METHOD_PERSIST = "DNS-PERSIST"
+
+MetricValue = int | float | str
+"""A trapper item value: numeric metrics, plus the TEXT env and LLD items."""
 
 _SECONDS_PER_DAY = 86400
 
@@ -166,24 +188,116 @@ def refresh_domain(d: Domain, *, attempts: int = 3, retry_delay: float = 5.0) ->
             time.sleep(retry_delay)
 
 
-def item_key(base: str, env: str) -> str:
-    """Return the environment-parameterized Zabbix item key.
+class DcvMethodSplit(NamedTuple):
+    """Domains split by DCV method, as produced by :func:`fetch_dcv_methods`.
 
-    The template defines every item once per environment using Zabbix key
-    parameters (``certinext.domains.total[prod]`` /
-    ``certinext.domains.total[sandbox]``), so prod and sandbox pushes to the
-    same Zabbix host land in separate items. The caller derives *env* from
-    the resolved CertiNext connection — never from a user-supplied label —
-    so sandbox data cannot masquerade as prod.
+    *failed* holds the domains whose method could not be read after
+    retries. A non-empty *failed* means *persist* and *token* are both
+    incomplete, so a caller must not publish anything derived from them
+    (an LLD list missing an apex would delete that apex's items).
+    """
+
+    persist: list[Domain]
+    token: list[Domain]
+    failed: list[Domain]
+
+
+def fetch_dcv_methods(
+    domains: Sequence[Domain], *, attempts: int = 3, retry_delay: float = 5.0,
+) -> DcvMethodSplit:
+    """Read each domain's DCV method and split *domains* by it.
+
+    The domain list endpoint does not carry the method; only
+    :meth:`Domain.get_dcv` does, one call per domain. A transient failure is
+    retried with the same idiom and exception types as
+    :func:`refresh_domain`. A domain still failing after its retries — or
+    raising anything else, which is not a documented failure mode of
+    ``get_dcv()`` — is logged once and lands in ``failed`` rather than
+    aborting the run, so the caller can decide what is still safe to send.
 
     Args:
-        base: One of the ``KEY_*`` constants.
-        env: :data:`ENV_PROD` or :data:`ENV_SANDBOX`.
+        domains: The scoped domain list (any DCV status — a domain still
+            pending DCV on dns-persist needs its TXT record watched too).
+        attempts: Total tries per domain (>= 1).
+        retry_delay: Seconds to wait between tries.
 
     Returns:
-        The full item key, e.g. ``certinext.domains.unverified[prod]``.
+        The split, each list in input order. ``DNS-PERSIST`` domains go to
+        ``persist``; every other method (``DNS-TXT``, ``HTTP-URL``,
+        ``DNS-CNAME``, …) goes to ``token``.
     """
-    return f"{base}[{env}]"
+    split = DcvMethodSplit(persist=[], token=[], failed=[])
+    for d in domains:
+        try:
+            method = _get_dcv_method(d, attempts=attempts, retry_delay=retry_delay)
+        except (CertiNextAPIError, httpx.HTTPError) as exc:
+            # One concise line per domain, as for refresh failures: a
+            # degraded API can fail every domain in a run.
+            log_caught_exception(
+                log, "Failed to read DCV method", exc, level="warning", domain=d.name,
+            )
+            split.failed.append(d)
+            continue
+        except Exception as exc:
+            log_caught_exception(
+                log, "Failed to read DCV method — unexpected error", exc, domain=d.name,
+            )
+            split.failed.append(d)
+            continue
+        (split.persist if method == DCV_METHOD_PERSIST else split.token).append(d)
+    return split
+
+
+def _get_dcv_method(d: Domain, *, attempts: int, retry_delay: float) -> str:
+    """Return one domain's upper-case DCV method, retrying transient failures.
+
+    Args:
+        d: The domain to query.
+        attempts: Total tries (>= 1) before the exception is re-raised.
+        retry_delay: Seconds to wait between tries.
+
+    Returns:
+        ``DcvInfo.method`` (already upper-cased by certinext).
+
+    Raises:
+        CertiNextAPIError: On the final attempt, if every retry also failed.
+        httpx.HTTPError: Same, for a transport-level failure.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return d.get_dcv().method
+        except (CertiNextAPIError, httpx.HTTPError):
+            if attempt >= attempts:
+                raise
+            log.warning(
+                "DCV method read failed — retrying",
+                domain=d.name, attempt=attempt, attempts=attempts, retry_delay=retry_delay,
+            )
+            time.sleep(retry_delay)
+    raise AssertionError("unreachable")  # pragma: no cover — loop always returns or raises
+
+
+def persist_discovery_value(persist: Sequence[Domain]) -> str:
+    """Build the LLD JSON for :data:`KEY_PERSIST_DISCOVERY`.
+
+    One ``{#APEX}`` row per distinct domain name, sorted so the value is
+    stable between runs. The template's agent item prototypes look up
+    ``_validation-persist.{#APEX}`` from it. Callers must pass the
+    *complete* persist list: Zabbix treats an apex missing from the value
+    as a lost resource and deletes its items after the rule's grace period.
+
+    Args:
+        persist: Every DNS-PERSIST domain in scope
+            (:attr:`DcvMethodSplit.persist`).
+
+    Returns:
+        A JSON array, e.g. ``[{"{#APEX}": "example.edu"}]``; ``[]`` when there
+        are none, which tells Zabbix the set is genuinely empty.
+    """
+    # Domain.name is Optional in the model; a nameless record has no TXT
+    # name to look up, so it cannot become a discovery row.
+    names = sorted({d.name for d in persist if d.name})
+    return json.dumps([{"{#APEX}": name} for name in names])
 
 
 def verified_domains(domains: Sequence[Domain]) -> list[Domain]:
@@ -202,7 +316,7 @@ def verified_domains(domains: Sequence[Domain]) -> list[Domain]:
     return [d for d in domains if d.status == "ACTIVE" and d.dcv_status == "VERIFIED"]
 
 
-def collect_domain_metrics(domains: Sequence[Domain], env: str) -> dict[str, int | float]:
+def collect_domain_metrics(domains: Sequence[Domain]) -> dict[str, MetricValue]:
     """Compute the domain-list metrics from a CertiNext domain listing.
 
     ``certinext.domains.total`` guards against a silently empty/truncated
@@ -212,63 +326,94 @@ def collect_domain_metrics(domains: Sequence[Domain], env: str) -> dict[str, int
 
     Args:
         domains: Domains as returned by the CertiNext list endpoint.
-        env: Environment key parameter (:data:`ENV_PROD` /
-            :data:`ENV_SANDBOX`) — see :func:`item_key`.
 
     Returns:
-        Mapping of environment-keyed Zabbix item key to value for
-        :data:`KEY_TOTAL` and :data:`KEY_UNVERIFIED`.
+        Mapping of Zabbix item key to value for :data:`KEY_TOTAL` and
+        :data:`KEY_UNVERIFIED`.
     """
     return {
-        item_key(KEY_TOTAL, env): len(domains),
-        item_key(KEY_UNVERIFIED, env): sum(1 for d in domains if d.needs_dcv),
+        KEY_TOTAL: len(domains),
+        KEY_UNVERIFIED: sum(1 for d in domains if d.needs_dcv),
     }
 
 
+def _days_left(domains: Sequence[Domain], now: datetime) -> list[float]:
+    """Return each known DCV expiry in *domains* as fractional days from *now*.
+
+    Args:
+        domains: Refreshed domains; those with ``dcv_expires is None`` are
+            skipped.
+        now: Reference time (timezone-aware).
+
+    Returns:
+        Days left per domain with a known expiry; negative once lapsed.
+    """
+    return [
+        (d.dcv_expires - now).total_seconds() / _SECONDS_PER_DAY
+        for d in domains
+        if d.dcv_expires is not None
+    ]
+
+
 def collect_expiry_metrics(
-    verified: Sequence[Domain],
+    token_verified: Sequence[Domain],
+    persist_verified: Sequence[Domain],
     expiry_days: int,
-    env: str,
     *,
     now: datetime | None = None,
-) -> dict[str, int | float]:
+) -> dict[str, MetricValue]:
     """Compute the DCV-expiry metrics from refreshed verified domains.
 
     The caller must have refreshed each domain first — the CertiNext list
     endpoint does not include ``validTill``; only the per-domain detail
     endpoint does. Domains whose expiry is unknown (``dcv_expires is None``)
-    are excluded from both metrics.
+    are excluded from every metric.
+
+    The two DCV method families are measured separately because their
+    ``validTill`` means different things. For a token method it is the
+    real deadline, so :data:`KEY_EXPIRING` and :data:`KEY_MIN_DAYS_LEFT`
+    count token domains only. For ``DNS-PERSIST`` it is just a reuse clock
+    that lapses every ~10 days by design, and the CA re-checks the TXT
+    record at the next issuance; alerting on it would fire every cycle, so
+    persist domains feed only :data:`KEY_PERSIST_MIN_DAYS_LEFT`, which the
+    template turns into an INFORMATION event.
+
+    :data:`KEY_TOKEN_DOMAINS` is the number of token domains with a known
+    expiry, i.e. exactly the set :data:`KEY_MIN_DAYS_LEFT` is computed
+    over. The template gates the days-left triggers on it being above zero,
+    so when the last token domain goes away the triggers stop evaluating
+    the stale ``last()`` of a ``min_days_left`` that is no longer sent.
 
     Args:
-        verified: Refreshed ACTIVE+VERIFIED domains
-            (see :func:`verified_domains`).
-        expiry_days: Renewal lead time in days; a domain counts as expiring
-            when its DCV expiry falls within this window (already-expired
-            included).
-        env: Environment key parameter (:data:`ENV_PROD` /
-            :data:`ENV_SANDBOX`) — see :func:`item_key`.
+        token_verified: Refreshed ACTIVE+VERIFIED token-method domains.
+        persist_verified: Refreshed ACTIVE+VERIFIED ``DNS-PERSIST`` domains.
+        expiry_days: Renewal lead time in days; a token domain counts as
+            expiring when its DCV expiry falls within this window
+            (already-expired included).
         now: Reference time for the day math (timezone-aware). Defaults to
             the current UTC time; injectable for tests.
 
     Returns:
-        Mapping with :data:`KEY_EXPIRING` (count) and, when at least one
-        expiry is known, :data:`KEY_MIN_DAYS_LEFT` (float days, may be
-        negative when a DCV has already lapsed), both environment-keyed.
+        Mapping with :data:`KEY_EXPIRING` and :data:`KEY_TOKEN_DOMAINS`
+        (always present); :data:`KEY_MIN_DAYS_LEFT` when at least one
+        token expiry is known; :data:`KEY_PERSIST_MIN_DAYS_LEFT` when at
+        least one persist expiry is known. Days are floats rounded to two
+        places and may be negative once lapsed.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = now + timedelta(days=expiry_days)
-    metrics: dict[str, int | float] = {
-        item_key(KEY_EXPIRING, env): sum(
-            1 for d in verified if d.dcv_expires is not None and d.dcv_expires <= cutoff
+    token_days = _days_left(token_verified, now)
+    persist_days = _days_left(persist_verified, now)
+    metrics: dict[str, MetricValue] = {
+        KEY_EXPIRING: sum(
+            1 for d in token_verified if d.dcv_expires is not None and d.dcv_expires <= cutoff
         ),
+        KEY_TOKEN_DOMAINS: len(token_days),
     }
-    days_left = [
-        (d.dcv_expires - now).total_seconds() / _SECONDS_PER_DAY
-        for d in verified
-        if d.dcv_expires is not None
-    ]
-    if days_left:
-        metrics[item_key(KEY_MIN_DAYS_LEFT, env)] = round(min(days_left), 2)
+    if token_days:
+        metrics[KEY_MIN_DAYS_LEFT] = round(min(token_days), 2)
+    if persist_days:
+        metrics[KEY_PERSIST_MIN_DAYS_LEFT] = round(min(persist_days), 2)
     return metrics
 
 
@@ -436,12 +581,11 @@ def bucket_orders(records: Sequence[OrderRecord]) -> OrderBuckets:
 
 def collect_order_metrics(
     buckets: OrderBuckets,
-    env: str,
     *,
     failing_lookback_days: int,
     cert_expiry_days: int,
     now: datetime | None = None,
-) -> dict[str, int | float]:
+) -> dict[str, MetricValue]:
     """Compute the order-health metrics from pre-bucketed orders.
 
     Deliberately avoids ``OrderRecord.certificate_status`` — a vendor
@@ -473,8 +617,6 @@ def collect_order_metrics(
 
     Args:
         buckets: The report split by :func:`bucket_orders`.
-        env: Environment key parameter (:data:`ENV_PROD` /
-            :data:`ENV_SANDBOX`) — see :func:`item_key`.
         failing_lookback_days: Only failed orders whose ``order_date``
             falls within this many days of *now* count toward
             :data:`KEY_ORDERS_FAILED_RECENT` — an older failure is normal
@@ -492,8 +634,7 @@ def collect_order_metrics(
         :data:`KEY_ORDERS_UNDOWNLOADED`, :data:`KEY_ORDERS_FAILED_RECENT`
         and :data:`KEY_ORDERS_EXPIRING` (always present) and, when at least
         one cert-bearing order carries an ``order_date``,
-        :data:`KEY_ORDERS_DAYS_SINCE_ISSUED` (float days), all
-        environment-keyed.
+        :data:`KEY_ORDERS_DAYS_SINCE_ISSUED` (float days).
     """
     now = now or datetime.now(timezone.utc)
     failing_cutoff = now - timedelta(days=failing_lookback_days)
@@ -501,16 +642,16 @@ def collect_order_metrics(
     # Both buckets hold orders the CA has generated a certificate for; only
     # the download step differs, which cert expiry doesn't care about.
     with_cert = [*buckets.issued, *buckets.undownloaded]
-    metrics: dict[str, int | float] = {
+    metrics: dict[str, MetricValue] = {
         # No re-filtering: bucket_orders already classified on the two
         # typed fields the vendor's data supports checking programmatically.
-        item_key(KEY_ORDERS_UNISSUED, env): len(buckets.unissued),
-        item_key(KEY_ORDERS_UNDOWNLOADED, env): len(buckets.undownloaded),
-        item_key(KEY_ORDERS_FAILED_RECENT, env): sum(
+        KEY_ORDERS_UNISSUED: len(buckets.unissued),
+        KEY_ORDERS_UNDOWNLOADED: len(buckets.undownloaded),
+        KEY_ORDERS_FAILED_RECENT: sum(
             1 for o in buckets.failed
             if o.order_date is not None and o.order_date >= failing_cutoff
         ),
-        item_key(KEY_ORDERS_EXPIRING, env): sum(
+        KEY_ORDERS_EXPIRING: sum(
             1 for o in with_cert
             if o.certificate_expiry_date is not None and o.certificate_expiry_date <= expiry_cutoff
         ),
@@ -518,12 +659,12 @@ def collect_order_metrics(
     issued_dates = [o.order_date for o in with_cert if o.order_date is not None]
     if issued_dates:
         days_since = (now - max(issued_dates)).total_seconds() / _SECONDS_PER_DAY
-        metrics[item_key(KEY_ORDERS_DAYS_SINCE_ISSUED, env)] = round(days_since, 2)
+        metrics[KEY_ORDERS_DAYS_SINCE_ISSUED] = round(days_since, 2)
     return metrics
 
 
 def push_metrics(
-    metrics: dict[str, int | float],
+    metrics: dict[str, MetricValue],
     *,
     zabbix_host: str,
     server: str,
