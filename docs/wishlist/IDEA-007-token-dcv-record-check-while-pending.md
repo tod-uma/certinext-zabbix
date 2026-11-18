@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Created:** 2026-11-18
 - **Updated:** 2026-11-18
+- **Tracking issue:** sysadmin/certinext-zabbix#11
 
 ## Context
 

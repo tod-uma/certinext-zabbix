@@ -100,7 +100,7 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
     - Fixed pre-existing drift while there: the deployment checklist said four unit files / two timers (it has
       been six / three since the hourly order-health timer, #8).
     - The README screenshot is captioned as a 0.1.x view, not retaken (needs a live 0.2.0 host).
-    - IDEA-007 has no coordinating GitLab issue yet (the `adr` skill wants one for a Proposed idea): ask Tod.
+    - IDEA-007 coordinating issue: #11 (opened 2026-11-18).
   - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
 - [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
   doing the shipping, if Tod drops R2.
