@@ -30,7 +30,14 @@ follow the upgrade section of the root repo's
 
 - Zabbix 7.0 server, and Zabbix agent (or agent 2) on the pusher machine
   for the passive dns-persist checks. The `net.dns.record` behaviour this
-  template relies on was verified on agent 2 7.0.31.
+  template relies on was verified on **agent 2** 7.0.31 only. With the
+  classic agent, check it before relying on the alerts. From the Zabbix
+  server or proxy, run `zabbix_get -s <pusher machine> -k agent.variant`
+  (`1` = agent, `2` = agent 2). Then run
+  `zabbix_get -s <pusher machine> -k 'net.dns.record[,_validation-persist.<a name that does not exist>,TXT]'`,
+  and confirm that the error starts with `Cannot perform DNS query`. If it
+  words that differently, a deleted record raises *lookup failing*
+  (AVERAGE) instead of *record missing* (HIGH).
 - `certinext-zabbix-push` 0.2.0 or later, on a machine that can reach the
   CertiNext API and this Zabbix server's (or proxy's) trapper port
   (10051 by default).
@@ -58,7 +65,12 @@ follow the upgrade section of the root repo's
      environment's `_validation-persist` TXT record, **without** the
      surrounding quotes. The default, `CONFIGURE-ME`, matches nothing, so
      every discovered apex alerts until this is set. Keep the real value in
-     host macros rather than editing the template.
+     host macros rather than editing the template. Take the value from
+     CertiNext: it is the `DNS-PERSIST` option's record value in a domain's
+     DCV detail (`certinext-domains get-dcv <apex> --validated-by SSLCOM`).
+     It names the CertiNext account, so one value covers every apex in an
+     environment, and prod and sandbox differ. Don't copy it from the
+     published TXT record, which would make the check circular.
    - `{$CERTINEXT.SENDER.ALLOWED}`: the pusher machine's source IP(s). The
      committed `127.0.0.1` rejects every real sender.
 4. **Schedule the pusher** for each environment: a frequent run (domain
@@ -163,6 +175,9 @@ Each item maps the agent's `Cannot perform DNS query` error (no such
 record) to an empty value, so a missing record reads as "no match". Any
 other error, such as a resolver timeout, leaves the item unsupported,
 which the "lookup failing" trigger catches. The two causes stay apart.
+A local resolver that sometimes drops queries therefore shows up as gaps
+in the local item, never as "record missing". `{$CERTINEXT.DNS.NODATA}`
+(3h) is sized to absorb occasional blips.
 
 ## Triggers
 
