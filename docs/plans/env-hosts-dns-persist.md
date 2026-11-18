@@ -52,11 +52,16 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
       CUSTOM_VALUE` with no params (empty string). The rule uses `lifetime: 3d` and
       `enabled_lifetime_type: DISABLE_NEVER`. These export constants come from memory of the 7.0 schema and
       have **not** been through an import yet: Verification 3 must confirm them.
-- [ ] **Session 2R — external review R1: package and hand over** (pusher + template + tests; see *External review
-  checkpoints*). Packaging only: it ends when the bundle or brief is handed over. **Recommended.**
-  - [ ] revision pinned (SHA recorded in the table under *External review checkpoints*)
-  - [ ] brief written, deliberate decisions re-verified against source
-  - [ ] outgoing artifact swept; Tod confirmed the send; service, product and date recorded
+- [x] **Session 2R — external review R1: package and hand over** (pusher + template + tests; see *External review
+  checkpoints*). Packaging only: it ends when the bundle or brief is handed over. **Recommended.** 2026-11-18
+  - [x] revision pinned: `73bab0b` (pipeline 56328 green), base `17809f4`
+  - [x] briefs written, every deliberate decision re-verified against source at `73bab0b`:
+    `review/REVIEW-BRIEF-codex-R1.md` (agentic) and `review/REVIEW-BRIEF-paste-R1.md` (paste-only, generated
+    from the Codex brief: only *Revision* and *Output format* differ). Bundle:
+    `review/certinext-zabbix-R1-review-bundle.md` (243 KB, 11 files, 0 omitted; line numbers spot-checked)
+  - [x] outgoing artifacts swept (gitleaks clean on the scope and on the bundle; the only grep hits are the internal
+    GitLab URL, already on the public mirror); Tod chose **both** reviewers (Codex + a paste-only one).
+    Table rows filled at hand-off; the paste-only service and both products' self-IDs are confirmed in session 3
 - [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
   - [ ] starts by processing R1's findings (fresh session; re-derive each against source)
   - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
@@ -231,7 +236,7 @@ working from this section alone.
      `token_domains` counts, and the misroute guard.
   4. Whether `tests/test_template.py` tests what its names claim (it was mutation-checked three ways; a reviewer
      may find a fourth).
-- **Skip the linters:** `ruff`, `mypy`, `pyright` and `pytest` (144 tests) are green, CI pipeline 56326.
+- **Skip the linters:** `ruff`, `mypy`, `pyright` and `pytest` (144 tests) are green, CI pipeline 56328.
 - **Deliberate decisions that look like defects** (each needs the reason and an invitation to argue; re-verify
   each against source at packaging time): bare keys with no `[env]` (the trapper doesn't expand macros in keys);
   one host per environment (a shared rule would need a merge coordinator); no freshness trigger on the discovery
@@ -273,8 +278,8 @@ working from this section alone.
 
 | Checkpoint | Service / product | Date | Pinned SHA | Findings file | Processed in |
 |---|---|---|---|---|---|
-| R1 (agentic) | | | | | |
-| R1 (paste-only, optional) | | | | | |
+| R1 (agentic) | Codex CLI (OpenAI); model from the findings' self-ID | handed over 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
+| R1 (paste-only, optional) | Gemini or ChatGPT web app, Tod to record which | handed over 2026-11-18 | `73bab0b` | `review/REVIEW-<service>-R1.md` (Tod saves the download) | session 3 |
 | R2 | | | | | |
 
 ## Steps
