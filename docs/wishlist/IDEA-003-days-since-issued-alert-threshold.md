@@ -1,8 +1,33 @@
 # IDEA-003: Add a severity trigger for days-since-last-issued once there's a baseline cadence
 
-- **Status:** Proposed
+- **Status:** Accepted → implemented in 0.2.0 (template only, no ADR)
 - **Created:** 2026-08-07
-- **Updated:** 2026-08-07
+- **Updated:** 2026-11-18
+
+## Resolution (2026-11-18)
+
+Implemented as a single WARNING trigger,
+`last(certinext.orders.days_since_issued)>{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}`,
+default **4** (days, a plain
+number: the item is in days, so a `4d` time suffix would mean 345,600).
+
+Baseline, UMS prod, 2,142 hourly trend rows from 2026-08-19 to
+2026-11-18 (maxima aggregated by hand, because `trend.get` ignores
+`sortfield`):
+
+| Statistic | Days |
+|---|---|
+| median | 0.19 |
+| p95 | 0.93 |
+| p99 | 1.72 |
+| worst gap after the pusher's first day | 2.09 |
+| first day live (2026-08-20) | 5.7 |
+
+The 5.7-day reading came on the pusher's first day, the same day the
+account's order counts collapsed, so it was not treated as a normal gap.
+4 days leaves about twice the worst normal gap. Both open questions
+below were settled the simple way: one fixed threshold, no gradient. A
+low-volume account (such as a sandbox) needs a host-level override.
 
 ## Context
 
