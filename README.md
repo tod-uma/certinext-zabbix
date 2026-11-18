@@ -1,7 +1,9 @@
 # certinext-zabbix
 
-CertiNext DCV health monitoring for Zabbix: a trapper-only Zabbix template
-plus the `certinext-zabbix-push` CLI that feeds it. For any InCommon /
+CertiNext DCV health monitoring for Zabbix: a Zabbix template plus the
+`certinext-zabbix-push` CLI that feeds it. Most items are trappers the CLI
+pushes; the template also has the Zabbix agent check each dns-persist
+domain's `_validation-persist` TXT record in DNS. For any InCommon /
 higher-ed operator using [CertiNext](https://www.entrust.com/products/certinext)
 who wants Domain Control Validation (DCV) expiry and verification-state
 visibility in Zabbix.
@@ -56,9 +58,12 @@ wanted.
    [templates/template_certinext/7.0/template_certinext.yaml](templates/template_certinext/7.0/template_certinext.yaml)
    via *Data collection → Templates → Import*. Follow the
    [per-template README](templates/template_certinext/7.0/README.md) to
-   link it to a host, match the host name, and set
-   `{$CERTINEXT.SENDER.ALLOWED}` — the template rejects every sender until
-   you do.
+   create **one Zabbix host per CertiNext environment** (with an agent
+   interface on the machine that runs the pusher), link the template, and
+   set the host macros, `{$CERTINEXT.SENDER.ALLOWED}` among them: the
+   template rejects every sender until you do. Upgrading from 0.1.x? Every
+   item key changed; see
+   [docs/deployment.md](docs/deployment.md#upgrading-from-01x).
 2. **Run the pusher**:
 
    ```bash
@@ -80,8 +85,9 @@ stderr.
 
 ## What it looks like
 
-Zabbix's Latest Data view after importing the template and linking two
-hosts (`prod` and `sandbox`):
+Zabbix's Latest Data view from a 0.1.x deployment, when one host carried
+both environments and every key had a `[prod]`/`[sandbox]` parameter. In
+0.2.0 each environment is its own host and the keys are bare:
 
 ![Zabbix Latest Data view showing CertiNext prod and sandbox items: DCV expiring within lead time, DCV minimum days left, domains total, and unverified domains](docs/images/zabbix-latest-data.png)
 
@@ -95,7 +101,9 @@ match the trapper items defined in
 [templates/template_certinext/7.0/template_certinext.yaml](templates/template_certinext/7.0/template_certinext.yaml).
 If you fork or edit the template, keep both in sync — a mismatched key
 results in `"Zabbix rejected item values"` at push time, not a schema
-error.
+error. `tests/test_template.py` checks this offline: every `KEY_*`
+must exist in the template, and every `{#…}` macro the discovery rule
+uses must be a column the pusher sends.
 
 ## Development
 

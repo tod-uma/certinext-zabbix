@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Created:** 2026-08-07
-- **Updated:** 2026-08-08
+- **Updated:** 2026-11-18
 
 ## Context
 
@@ -71,6 +71,16 @@ an item prototype per discovered `{#DOMAIN}` (or `{#ORDER}`), and a
 decision on prototype triggers vs. relying on the existing aggregate
 triggers. No new CertiNext API calls — same data already fetched by
 `fetch_orders()`.
+
+**Update 2026-11-18:** 0.2.0 built this repo's first discovery rule (the
+dns-persist apexes, [ADR 0014](../adr/0014-dns-persist-checked-by-zabbix-agent.md)),
+and with it the patterns this idea would have had to invent: a trapper
+discovery key the pusher sends, a lost-resource policy (delete after 3
+days, never disable), the rule that a partial list is never sent, a
+count item that alerts when the list shrinks, and a test that every LLD
+macro the template uses is a column the pusher sends. That lowers the
+effort. It is still not now: production had about 285 unissued orders,
+so per-order discovery would create hundreds of items.
 
 ## Open questions & caveats
 

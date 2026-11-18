@@ -25,3 +25,4 @@ an ADR (see [../adr/](../adr/)).
 | [IDEA-004](IDEA-004-stuck-order-domain-visibility-lld.md) | Per-domain visibility into stuck orders via Zabbix LLD | Proposed |
 | [IDEA-005](IDEA-005-originator-alert-severity-bucketing.md) | Bucket order-health alert severity by `originator` (ACME vs. manual) | Proposed |
 | [IDEA-006](IDEA-006-enforce-ruff-format.md) | Run `ruff format` and enforce it in CI | Proposed |
+| [IDEA-007](IDEA-007-token-dcv-record-check-while-pending.md) | Check a token-method DCV record in DNS while its validation is pending | Proposed |

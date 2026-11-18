@@ -12,12 +12,13 @@ CI (see PyPI section) since GitLab's pipelines are invisible to them.
 
 ## Remotes and the GitHub mirror
 
-The git remote is named `gitlab` (no `origin`, per this org's convention).
+The git remote is named `origin` (checked with `git remote -v`,
+2026-11-18; earlier versions of this file said `gitlab`).
 `gitlab.its.maine.edu` (UMS-internal) is canonical;
 `github.com/tod-uma/certinext-zabbix` is a GitLab **push mirror** — the
 public, no-login-required face for InCommon/higher-ed users, configured
 in GitLab under *Settings → Repository → Mirroring repositories*. Push
-to `gitlab`; never push directly to GitHub.
+to `origin`; never push directly to GitHub.
 
 ## `KEY_*` ↔ template sync
 
@@ -26,8 +27,12 @@ The `KEY_*` constants in `certinext_zabbix/zabbix_push.py` (e.g.
 defined in `templates/template_certinext/7.0/template_certinext.yaml` —
 that YAML is the Zabbix-side source of truth for items, triggers, and
 macros. A key added/renamed in one place without the matching change in
-the other fails silently at push time (`"Zabbix rejected item values"`),
-not as a type/schema error.
+the other fails at push time (`"Zabbix rejected item values"`), not as a
+type/schema error. `tests/test_template.py` now catches it offline: it
+parses the YAML and asserts every `KEY_*` exists as a trapper item or
+discovery key, every macro used is declared, and every `{#…}` LLD macro is
+a column the pusher sends. Keys are bare (no `[env]`): each CertiNext
+environment is its own Zabbix host (ADR 0013).
 
 ## Testing
 

@@ -79,7 +79,10 @@ conftest.
   trapper send. Its `KEY_*` item keys must stay in sync with
   `templates/template_certinext/7.0/template_certinext.yaml` (the Zabbix
   template import file — server-side source of truth for items,
-  triggers, and macros).
+  triggers, and macros). `tests/test_template.py` enforces that offline
+  (keys, declared macros, LLD macro columns). Keys are bare: each
+  CertiNext environment is its own Zabbix host
+  ([ADR 0013](docs/adr/0013-one-zabbix-host-per-certinext-environment.md)).
 - `certinext_zabbix/zabbix_push_cli.py` — the `certinext-zabbix-push`
   typer entry point, thin over `zabbix_push.py`. `--zabbix-server` /
   `ZABBIX_SERVER` has **no default** — an unset value fails fast rather
@@ -107,9 +110,9 @@ below).
 
 ## Remotes and mirror
 
-The git remote is named `gitlab` (no `origin`). GitLab is canonical;
+The git remote is named `origin`. GitLab is canonical;
 `github.com/tod-uma/certinext-zabbix` is a push mirror — push to
-`gitlab`, never directly to GitHub. The mirror also runs its own CI
+`origin`, never directly to GitHub. The mirror also runs its own CI
 (`.github/workflows/ci.yml`, copied from `certinext`'s pattern) so
 external contributors' PRs get checks GitLab's pipelines never see them.
 

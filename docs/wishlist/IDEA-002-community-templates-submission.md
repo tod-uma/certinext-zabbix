@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Created:** 2026-07-22
-- **Updated:** 2026-07-22
+- **Updated:** 2026-11-18
 - **Tracking issue:** sysadmin/certinext-zabbix#2
 
 ## Context
@@ -67,6 +67,13 @@ Small-to-medium: the template itself needs no rework (that was the
 point of ADR 0006), but drafting the PR, responding to review feedback,
 and deciding how to keep a submitted copy in sync with this repo's own
 copy going forward are new, unscoped work.
+
+**Update 2026-11-18:** 0.2.0 made the template single-environment: one
+Zabbix host per CertiNext environment, bare item keys, no duplicated
+`[prod]`/`[sandbox]` block ([ADR 0013](../adr/0013-one-zabbix-host-per-certinext-environment.md)).
+One template per monitored thing is closer to what community templates
+usually look like. It now also has agent item prototypes, so its name
+(*by Zabbix trapper*) may need revisiting before a submission.
 
 ## Open questions & caveats
 
