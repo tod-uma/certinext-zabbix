@@ -266,6 +266,20 @@ class TestStructure:
         assert rule["lifetime"] == "3d"
         assert rule["enabled_lifetime_type"] == "DISABLE_NEVER"
 
+    def test_missing_record_maps_to_empty_value(self, template: dict[str, Any]) -> None:
+        """Only "Cannot perform DNS query" becomes "": scope 0 = error matches (7.0 API).
+
+        Scope 1 would invert it: a missing record stays unsupported while a
+        resolver timeout reads as a missing record (Codex R1 finding 1).
+        """
+        rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
+        for proto in rule["item_prototypes"]:
+            (step,) = proto["preprocessing"]
+            assert step["type"] == "CHECK_NOT_SUPPORTED"
+            assert step["parameters"] == ["0", "^Cannot perform DNS query"]
+            assert step["error_handler"] == "CUSTOM_VALUE"
+            assert step["error_handler_params"] == ""
+
     def test_persist_prototypes_check_three_resolvers(self, template: dict[str, Any]) -> None:
         """One local and two external TXT lookups per discovered apex."""
         rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
