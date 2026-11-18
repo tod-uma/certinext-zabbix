@@ -140,7 +140,7 @@ ZABBIX_HOSTNAME=<prod host name exactly as registered in Zabbix>
 | `CERTINEXT_ORDER_HEALTH` | no | off | Enable the order-health metrics — see the CLI flag reference below |
 | `CERTINEXT_ORDER_FAILING_LOOKBACK_DAYS` | no | `30` | Only count failed orders from this many days back as "failed recently" |
 | `CERTINEXT_ORDER_HISTORY_DAYS` | no | `1095` | Bound the orders-report fetch to this many days back — see the CLI flag reference below |
-| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on JSON-lines DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
+| `CERTINEXT_ZABBIX_DEBUG_LOG` | no | off | Path for the always-on human-readable DEBUG traceback log — see [Recovering a traceback from an unattended run](#recovering-a-traceback-from-an-unattended-run) |
 | `HTTPS_PROXY` / `NO_PROXY` | no | — | Standard proxy vars, honored for the CertiNext HTTPS calls (httpx) |
 
 ### CLI flag reference
@@ -398,7 +398,7 @@ a terminal. It is **host-local by design** and deliberately not ingested into
 Splunk, so reading it means SSH-ing to the host:
 
 ```bash
-grep -A30 'level=error' /var/log/certinext-zabbix/debug.log
+grep -A30 '\[error' /var/log/certinext-zabbix/debug.log
 ```
 
 Two consequences of that being host-local: log rotation is the only thing

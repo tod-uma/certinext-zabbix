@@ -53,7 +53,7 @@ VersionOption = Annotated[bool, typer.Option(
 DebugLogPathOption = Annotated[Path | None, typer.Option(
     "--debug-log-path", metavar="PATH", envvar="CERTINEXT_ZABBIX_DEBUG_LOG",
     help=(
-        "Append a JSON-lines DEBUG-level log (with full tracebacks) to this path, "
+        "Append a human-readable DEBUG-level log (with full tracebacks) to this path, "
         "independent of --verbose (env: CERTINEXT_ZABBIX_DEBUG_LOG; default: off). "
         "Rotation is the deployer's responsibility (e.g. logrotate). This is what "
         "makes an unattended systemd-timer run's traceback recoverable — "
@@ -83,7 +83,7 @@ def configure_logging(
         log_mode: Whether non-interactive output drops the redundant
             ``timestamp``/``pid`` fields — see
             :class:`certinext.cli_support.LogMode`. Ignored on a TTY.
-        debug_log_path: When set, append a JSON-lines DEBUG-level log
+        debug_log_path: When set, append a human-readable DEBUG-level log
             (with full tracebacks) to this path, independent of
             ``verbose`` — see :func:`certinext.cli_support.setup_logging`.
             No default; unset means off.
