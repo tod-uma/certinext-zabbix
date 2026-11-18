@@ -11,13 +11,15 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
 
 ## Status
 
-- [ ] **Session 1 — pre-work + pusher** (steps 0, 1, pusher half of 3)
+- [x] **Session 1 — pre-work + pusher** (steps 0, 1, pusher half of 3), 2026-11-18
   - [x] keyring extra + ADR 0012 landed on main (MR !19, merged 2026-11-18)
   - [x] `review/` in `.git/info/exclude`
   - [x] branch `feat/env-hosts-dns-persist`, version `0.2.0a1`
   - [x] this plan committed
-  - [ ] pusher code (step 1)
-  - [ ] pusher tests (step 3, first two bullets) green in CI
+  - [x] pusher code (step 1), commit `fd7d24e`
+  - [x] pusher tests (step 3, first two bullets): 120 passed locally; ruff, mypy, pyright clean
+  - [ ] Verification 2 (live prod `--dry-run`): not run in session 1; Tod's call, can run any time before
+    session 4
 - [ ] **Session 2 — template** (step 2, `tests/test_template.py`, IDEA-003 trigger)
 - [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
 - [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
@@ -153,9 +155,15 @@ extra step before session 3.
 ### 1. Pusher (`certinext_zabbix/zabbix_push.py`, `zabbix_push_cli.py`)
 
 - **Keys:**
-  - `item_key()` returns the bare key; `env` stays for logs and the guard.
+  - ~~`item_key()` returns the bare key~~ **As built:** `item_key()` is removed and the `collect_*` functions
+    lost their `env` parameter; metrics use the `KEY_*` constants directly. Keeping a function that ignores its
+    argument would mislead callers. `env` stays in the CLI for logs, locks and `certinext.env`.
   - New constants next to `KEY_*`: `KEY_ENV`, `KEY_PERSIST_DISCOVERY`, `KEY_TOKEN_DOMAINS`,
-    `KEY_PERSIST_MIN_DAYS_LEFT`.
+    `KEY_PERSIST_MIN_DAYS_LEFT`. Also `DCV_METHOD_PERSIST = "DNS-PERSIST"` and `MetricValue = int | float | str`.
+  - **As built, for session 2:** `dcv.token_domains` counts verified token domains *with a known expiry* —
+    exactly the set `min_days_left` is computed over — so the `>0` gate matches whether `min_days_left` was
+    sent. On a `get_dcv()` failure, discovery **and** all expiry metrics are withheld (exit 1). A detail-refresh
+    failure withholds only the expiry metrics; discovery still goes out, because the method split was complete.
 - **New helpers:**
   - `fetch_dcv_methods(domains) -> (persist, token, failed)`, with retries shaped like `refresh_domain()` and
     the method from `DcvInfo.method`.
