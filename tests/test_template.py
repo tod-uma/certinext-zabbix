@@ -235,6 +235,38 @@ class TestTriggers:
         gate = f"last(/{TEMPLATE_NAME}/{zabbix_push.KEY_TOKEN_DOMAINS})>0"
         assert all(gate in t["expression"] for t in gated)
 
+    def test_no_lld_macro_in_unquoted_macro_context(self, export: dict[str, Any]) -> None:
+        """No user macro carries an LLD macro as its (unquoted) context.
+
+        Zabbix ends an unquoted context at the first ``}``, so
+        ``{$M:{#APEX}}`` parses as context ``{#APEX`` plus a stray ``}``:
+        LLD never substitutes it and a ``find()`` pattern built from it
+        can never match (0.2.0rc1, every apex alerted on first lookup).
+        """
+        bad = [
+            node for node in _walk(export)
+            if isinstance(node, str) and re.search(r"\{\$[A-Z0-9_.]+:\{#", node)
+        ]
+        assert not bad, f"LLD macro in an unquoted user-macro context: {bad}"
+
+    def test_persist_find_gated_on_full_window(self, export: dict[str, Any]) -> None:
+        """Each dns-persist ``find(item,#N)`` is paired with ``count(item,#N)>=N``.
+
+        ``find(…,#3)`` evaluates on however many values exist, so without
+        the gate a freshly discovered apex alerts on its first miss.
+        """
+        finds = [
+            (t["name"], t["expression"]) for t in _all_triggers(export)
+            if "PERSIST.EXPECTED" in t["expression"]
+        ]
+        assert len(finds) == 2
+        for name, expr in finds:
+            calls = re.findall(r"find\((/[^/]+/[a-z0-9_.]+\[[^\]]*\]),#(\d+),", expr)
+            assert calls, name
+            for ref, n in calls:
+                gate = f"count({ref},#{n})>={n}"
+                assert gate in expr, f"{name!r}: no full-window gate for find({ref},#{n})"
+
     def test_misroute_guard_compares_env(self, export: dict[str, Any]) -> None:
         """A run sent to the wrong environment's host raises a HIGH problem."""
         guard = [

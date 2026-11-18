@@ -201,7 +201,9 @@ deployment sequence:
      environment* trigger on its first run.
    - `{$CERTINEXT.PERSIST.EXPECTED}` — that environment's
      `_validation-persist` TXT value, **without** the surrounding quotes.
-     The default `CONFIGURE-ME` fails closed: every discovered apex raises
+     Enter the full string, e.g. `ssl.com; accounturi=https://…`, not just
+     the CA or API hostname: Zabbix accepts any value and would just raise
+     *record missing* on every apex. The default `CONFIGURE-ME` fails closed: every discovered apex raises
      *record missing* until it is set.
    - `{$CERTINEXT.SENDER.ALLOWED}` — the source IP(s) of the machine running
      `certinext-zabbix-push`. The committed value (`127.0.0.1`) rejects
