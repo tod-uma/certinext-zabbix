@@ -52,7 +52,16 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0a1` (breaki
       CUSTOM_VALUE` with no params (empty string). The rule uses `lifetime: 3d` and
       `enabled_lifetime_type: DISABLE_NEVER`. These export constants come from memory of the 7.0 schema and
       have **not** been through an import yet: Verification 3 must confirm them.
+- [ ] **Session 2R — external review R1: package and hand over** (pusher + template + tests; see *External review
+  checkpoints*). Packaging only: it ends when the bundle or brief is handed over. **Recommended.**
+  - [ ] revision pinned (SHA recorded in the table under *External review checkpoints*)
+  - [ ] brief written, deliberate decisions re-verified against source
+  - [ ] outgoing artifact swept; Tod confirmed the send; service, product and date recorded
 - [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
+  - [ ] starts by processing R1's findings (fresh session; re-derive each against source)
+  - [ ] ends, after the docs and ADRs are written, by packaging R2 and handing it over. **Optional.**
+- [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
+  doing the shipping, if Tod drops R2.
 - [ ] **Session 4 — UMS cut-over, with Tod** (step 5 Tod's list, Verification 3–5)
 - [ ] **Session 5 — observation** (Follow-ups; runs any time after 2026-11-20 ~13:41Z)
 
@@ -62,7 +71,9 @@ A fresh session reads **this document only**, plus the files its row in the sess
 re-read the earlier sessions' files, redo the research under *Context*, or reopen the decisions under *Design*.
 These were settled after a Gemini review and a Codex review. Each session ends with `/wrap-up`: tick the
 checklist above, commit, push, then `bash ~/.claude/scripts/ci-wait.sh`. The next session's opening prompt is
-just "continue certinext-zabbix env-hosts plan, session N".
+just "continue certinext-zabbix env-hosts plan, session N". N can be `2R` or `3R`: those are the external-review
+hand-off sessions. A review session packages a bundle *or* processes findings, never both, because a session that
+wrote the brief has already formed opinions about what the reviewer should have found.
 
 ## Context
 
@@ -163,7 +174,9 @@ reads.
 |---|---|---|---|---|---|
 | 1 | Pre-work + pusher | 0, 1, pusher half of 3 | this plan | keyring MR merged; branch exists; plan committed; pusher code + its tests green in CI | largest (Python + 2 test files) |
 | 2 | Template | 2, `test_template.py`, IDEA-003 trigger | session 1's commit; reads only the YAML + `KEY_*` constants | YAML rewritten; `test_template.py` green; CI green | YAML-heavy, little else |
-| 3 | Docs + ship | 4, 5 (repo side) | sessions 1–2 on the branch | ADRs 0013/0014, README/deployment/upgrade docs; MR merged; 0.2.0 pre-release tagged and verified | medium |
+| 2R | Review R1: package | R1 (pusher, template, tests) | sessions 1–2 on the branch | bundle or brief handed to the reviewer; table row filled in; **stop** | small |
+| 3 | Docs (+ R1 findings, + R2 package) | 4, R1 findings, R2 | R1's findings file; sessions 1–2 on the branch | R1 findings triaged and fixes pushed; ADRs 0013/0014 and README/deployment/upgrade docs written; R2 handed over, or dropped | medium |
+| 3R | Review R2: process, then ship | R2 findings, 5 (repo side) | R2's findings file | R2 findings triaged and fixed; CI green; MR merged; 0.2.0 pre-release tagged and verified | small to medium |
 | 4 | UMS cut-over (with Tod) | 5 (Tod's list), Verification 3–5 | the released version | hosts + macros set; deploy done; MCP checks pass; negative tests run | mostly live checks |
 | 5 | Observation | Follow-ups | 2026-11-20 after 13:41Z | `dcvStatus` behaviour after lapse recorded in the ADR/issue | short |
 
@@ -171,6 +184,98 @@ reads.
 first. Sessions 4 and 5 are independent: if 2026-11-20 arrives before session 4, run session 5 on its own. Its
 finding may change the `unverified` metric, so if it lands in time it gets folded back into this plan as an
 extra step before session 3.
+
+## External review checkpoints
+
+Two checkpoints, placed where an outside reader adds the most before the next step makes a mistake expensive.
+The earlier Gemini and Codex reviews covered the *design*; nothing yet has read the *build*. Mechanics, the
+gotchas and the findings-processing method are in the `external-review` skill: load it at 2R and 3R rather than
+working from this section alone.
+
+<details>
+<summary>Why these two places, and why not others?</summary>
+
+- **R1 sits between the template and the docs.** The template is hand-written and has never been imported (its
+  export constants are listed as unverified under *Session 2 — As built*), and the trigger expressions carry
+  quoting, `or`-joined `nodata()` and dependency subtleties. A defect found after the docs are written means
+  rewriting prose as well as YAML. R1 is also the cheapest moment: the diff is entirely local and self-contained.
+- **R2 sits between the docs and the MR/tag.** What an operator will actually follow is the 0.1.x → 0.2.0 upgrade
+  section, and the author is the worst reader of it. A cold read for missing steps is worth having before the tag,
+  because session 4 follows it live with Tod.
+- **No checkpoint in session 4.** That session's evidence is the live import (Verification 3) and the live
+  alerts (4–5), which beat any reviewer's opinion. If the import shows a constant was wrong, fix it and re-import:
+  exporting the live template and diffing it against the file is a stronger check than asking another model.
+- **No checkpoint in session 5.** It records an observation, not a design.
+- **Cost, stated plainly:** each checkpoint adds a hand-over round trip whose turnaround we don't control, and
+  Apple distrusts the emSign G1 root on **2026-11-30**; session 4 should not slip past that for the sake of a
+  review. R1 is recommended. R2 is optional and the first thing to drop if time is short.
+</details>
+
+### R1 — build review (session 2R packages; session 3 processes)
+
+- **Revision:** the branch tip after session 2 (`b618da7` at the time of writing; re-pin at packaging). Diff scope
+  against `main`: `certinext_zabbix/`, `templates/`, `tests/`, `docs/plans/` and `docs/adr/`.
+- **Reviewers:** an agentic reviewer working in this tree (the Codex-style path: no bundle; the brief pins the SHA
+  and tells it to read via `git show <SHA>:<path>`), and, if wanted, a paste-only reviewer (Gemini or ChatGPT) on
+  a bundle from `make-review-bundle.py --path certinext_zabbix --path templates --path tests`. Two reviewers
+  agreeing is the useful signal: the earlier rounds' reviewers converged on the same defects.
+- **Look for, in priority order:**
+  1. Zabbix 7.0 import correctness of the hand-written YAML: the export constants (`CHECK_NOT_SUPPORTED`
+     parameters, `error_handler: CUSTOM_VALUE`, `enabled_lifetime_type: DISABLE_NEVER`, `lifetime`), canonical
+     ordering (a mis-ordered file reports `changed` on every import), and trigger prototypes that depend on other
+     prototypes.
+  2. Trigger semantics: the `find(…,#3,"like","\"…\"")` quoting with a context macro, the three-way `or` of
+     `nodata()`, `last()` gates, behaviour when items are unsupported or freshly discovered, and whether
+     "lookup failing" and "record missing" can both fire.
+  3. Pusher: that discovery can never be sent partial, the `get_dcv()` failure path and its exit code, what
+     `token_domains` counts, and the misroute guard.
+  4. Whether `tests/test_template.py` tests what its names claim (it was mutation-checked three ways; a reviewer
+     may find a fourth).
+- **Skip the linters:** `ruff`, `mypy`, `pyright` and `pytest` (144 tests) are green, CI pipeline 56326.
+- **Deliberate decisions that look like defects** (each needs the reason and an invitation to argue; re-verify
+  each against source at packaging time): bare keys with no `[env]` (the trapper doesn't expand macros in keys);
+  one host per environment (a shared rule would need a merge coordinator); no freshness trigger on the discovery
+  rule (the `dcv.expiring` `nodata()` already covers it); `{$CERTINEXT.ENV}` defaults to `prod`;
+  `{$CERTINEXT.PERSIST.EXPECTED}` defaults to `CONFIGURE-ME` and fails closed; the persist INFO trigger is
+  lapse-only with a literal `<=0`; `orders.expiring` has no trigger (ADR 0008); the template name is unchanged
+  although it now has agent prototypes.
+- **Exit:** a findings file, with the reviewer's self-ID block, on disk or pasted back and the SHA it names
+  checked against the pinned one. Session 3 triages it (real / wrong, with the evidence / stylistic), fixes what
+  survived, and credits it with an `External-review:` trailer per finding.
+
+### R2 — operator-doc cold read (session 3 packages; session 3R processes)
+
+- **Revision:** the branch tip once ADRs 0013/0014 and the docs are written, before the MR.
+- **Scope:** the README and the template README, `docs/deployment.md` including the 0.1.x → 0.2.0 upgrade
+  section, ADRs 0013/0014, and the template YAML for reference.
+- **Look for:** steps missing from the upgrade (re-import, relink, history restarting, macro moves, the
+  `ZABBIX_HOSTNAME` per-run setting); contradictions between the docs and the template; anything an operator
+  with only these files could not do; ADR claims that the template doesn't bear out.
+- **Optional:** Tod decides at the end of session 3. Dropped → session 3 opens the MR and tags, and 3R doesn't happen.
+
+### Rules for both checkpoints
+
+- **Ask Tod before sending anything.** Name the service and what is in the bundle. Sending is publication, even
+  though the repo already mirrors publicly: this plan and the sessions' as-built notes were written for a public
+  mirror, but the outgoing artifact is swept again (`gitleaks`, plus a grep for internal hostnames, the prod
+  apex, order numbers and IPs), and every hit is accounted for out loud.
+- **Name any gitignored file that holds real secrets by path** in an agentic reviewer's brief. CertiNext
+  credentials live in the OS keyring, but run `git status --ignored` at packaging time and list anything else.
+  `review/` is already in `.git/info/exclude`: put briefs and findings there, named per reviewer and round
+  (`review/REVIEW-BRIEF-<reviewer>-R1.md`, `review/REVIEW-<reviewer>-R1.md`), because a generic name overwrites the
+  previous round with no git copy.
+- **Build the hand-over prompt from the brief just written**, naming that brief, the output file and the pinned
+  SHA; check each against `review/`. A prompt copied forward from an earlier round once re-reviewed an old commit.
+- **On return, check the findings file's `Reviewed:` SHA first.** Re-derive every finding against source: the
+  failure modes seen so far are fabricated premises and real findings with a fabricated supporting detail.
+- **Record the hand-off half of the attribution** while it's fresh (which service and product Tod pasted into,
+  and when), because the reviewer's self-report is unreliable:
+
+| Checkpoint | Service / product | Date | Pinned SHA | Findings file | Processed in |
+|---|---|---|---|---|---|
+| R1 (agentic) | | | | | |
+| R1 (paste-only, optional) | | | | | |
+| R2 | | | | | |
 
 ## Steps
 
