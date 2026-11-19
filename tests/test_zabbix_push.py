@@ -31,14 +31,13 @@ from certinext_zabbix.zabbix_push import (
     KEY_ORDERS_UNISSUED,
     KEY_PERSIST_APEXES,
     KEY_PERSIST_DISCOVERY,
-    KEY_PERSIST_EXPECTED,
     KEY_PERSIST_MIN_DAYS_LEFT,
     KEY_TOKEN_DOMAINS,
     KEY_TOTAL,
     KEY_UNVERIFIED,
+    PERSIST_VALUE_UNAVAILABLE,
     DomainScope,
     OrderBuckets,
-    PersistExpectedError,
     bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
@@ -48,7 +47,7 @@ from certinext_zabbix.zabbix_push import (
     normalise_persist_value,
     persist_apex_names,
     persist_discovery_value,
-    persist_expected_value,
+    persist_expected_by_apex,
     persist_record_value,
     push_metrics,
     refresh_domain,
@@ -109,7 +108,10 @@ class TestBareKeys:
         assert KEY_TOKEN_DOMAINS == "certinext.dcv.token_domains"
         assert KEY_PERSIST_MIN_DAYS_LEFT == "certinext.dcv.persist_min_days_left"
         assert KEY_PERSIST_APEXES == "certinext.dcv.persist_apexes"
-        assert KEY_PERSIST_EXPECTED == "certinext.dcv.persist_expected"
+
+    def test_no_persist_expected_key(self) -> None:
+        # Removed in #12's redesign: the value rides in the discovery rows.
+        assert not hasattr(zabbix_push, "KEY_PERSIST_EXPECTED")
 
 
 class TestCollectDomainMetrics:
@@ -342,7 +344,7 @@ class TestPersistRecordValue:
         _PERSIST_VALUE, f'"{_PERSIST_VALUE}"', f"  {_PERSIST_VALUE}\n", f'  " {_PERSIST_VALUE} " ',
     ])
     def test_normalises_to_unquoted_form(self, raw: str) -> None:
-        # The macro holds the value without quotes; the template adds them.
+        # {#PERSIST.EXPECTED} holds the value without quotes; the template adds them.
         assert normalise_persist_value(raw) == _PERSIST_VALUE
 
     @pytest.mark.parametrize("raw", [None, "", "   ", '""'])
@@ -353,52 +355,88 @@ class TestPersistRecordValue:
         assert normalise_persist_value('"') == '"'
 
 
-class TestPersistExpectedValue:
-    """One agreed value or nothing: fail closed (certinext-zabbix#12)."""
+class TestPersistExpectedByApex:
+    """Each apex gets the CA's value, or a never-matching placeholder (certinext-zabbix#12)."""
 
-    def test_agreeing_apexes_return_the_value(self) -> None:
-        persist = [_domain("a.edu"), _domain("b.edu")]
-        assert persist_expected_value(persist, [_PERSIST_VALUE, _PERSIST_VALUE]) == _PERSIST_VALUE
+    _OTHER = "other.example; accounturi=https://other.example.invalid/acct/2"
 
-    def test_no_persist_domains_is_none_not_an_error(self) -> None:
-        assert persist_expected_value([], []) is None
+    def test_each_apex_gets_its_own_value(self) -> None:
+        # No account-wide assumption: different apexes may differ.
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, self._OTHER],
+        )
+        assert result.values == {"a.edu": _PERSIST_VALUE, "b.edu": self._OTHER}
+        assert result.problems == {}
 
-    def test_missing_value_raises(self) -> None:
-        with pytest.raises(PersistExpectedError) as exc_info:
-            persist_expected_value([_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, ""])
-        assert exc_info.value.apexes_by_value[""] == ["b.edu"]
+    def test_no_persist_domains_is_empty_not_an_error(self) -> None:
+        assert persist_expected_by_apex([], []) == ({}, {})
 
-    def test_mixed_values_raise_and_list_apexes_per_value(self) -> None:
-        other = "other.example; accounturi=https://other.example.invalid/acct/2"
-        persist = [_domain("c.edu"), _domain("a.edu"), _domain("b.edu")]
-        with pytest.raises(PersistExpectedError) as exc_info:
-            persist_expected_value(persist, [_PERSIST_VALUE, other, _PERSIST_VALUE])
-        assert exc_info.value.apexes_by_value == {_PERSIST_VALUE: ["b.edu", "c.edu"], other: ["a.edu"]}
+    def test_missing_value_gets_placeholder_and_problem(self) -> None:
+        result = persist_expected_by_apex([_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, ""])
+        assert result.values == {"a.edu": _PERSIST_VALUE, "b.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert set(result.problems) == {"b.edu"}
+
+    def test_records_disagreeing_for_one_apex_fail_closed(self) -> None:
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("a.edu")], [_PERSIST_VALUE, self._OTHER],
+        )
+        assert result.values == {"a.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert "disagree" in result.problems["a.edu"]
+
+    def test_duplicate_records_that_agree_are_fine(self) -> None:
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("a.edu")], [_PERSIST_VALUE, _PERSIST_VALUE],
+        )
+        assert result == ({"a.edu": _PERSIST_VALUE}, {})
+
+    @pytest.mark.parametrize("bad", ['ssl.com; x="y"', "ssl.com; x=\\y"])
+    def test_quote_or_backslash_is_refused(self, bad: str) -> None:
+        # Either would have to survive LLD substitution into a quoted
+        # trigger-function parameter.
+        result = persist_expected_by_apex([_domain("a.edu")], [bad])
+        assert result.values == {"a.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert "a.edu" in result.problems
+
+    def test_nameless_record_is_dropped_like_discovery(self) -> None:
+        result = persist_expected_by_apex([_domain(None), _domain("a.edu")], ["", _PERSIST_VALUE])  # type: ignore[arg-type]
+        assert result == ({"a.edu": _PERSIST_VALUE}, {})
+
+    def test_keys_always_equal_apex_names(self) -> None:
+        # Every apex keeps its row, problem or not, so none loses its checks.
+        persist = [_domain("b.edu"), _domain("a.edu"), _domain("c.edu")]
+        result = persist_expected_by_apex(persist, [_PERSIST_VALUE, "", self._OTHER])
+        assert sorted(result.values) == persist_apex_names(persist)
+
+    def test_placeholder_cannot_match_a_real_record(self) -> None:
+        assert '"' not in PERSIST_VALUE_UNAVAILABLE
+        assert PERSIST_VALUE_UNAVAILABLE not in _PERSIST_VALUE
 
     def test_length_mismatch_is_a_bug_not_a_silent_pass(self) -> None:
         with pytest.raises(ValueError):
-            persist_expected_value([_domain("a.edu")], [])
+            persist_expected_by_apex([_domain("a.edu")], [])
 
 
 class TestPersistDiscoveryValue:
-    """The LLD JSON the template's {#APEX} prototypes are built from."""
+    """The LLD JSON the template's {#APEX}/{#PERSIST.EXPECTED} prototypes are built from."""
 
-    def test_sorted_deduplicated_rows(self) -> None:
-        value = persist_discovery_value([
-            _domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu"),
-        ])
-        assert json.loads(value) == [{"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"}]
+    def test_sorted_rows_carry_the_expected_value(self) -> None:
+        value = persist_discovery_value({"b.example.edu": "vb", "a.example.edu": "va"})
+        assert json.loads(value) == [
+            {"{#APEX}": "a.example.edu", "{#PERSIST.EXPECTED}": "va"},
+            {"{#APEX}": "b.example.edu", "{#PERSIST.EXPECTED}": "vb"},
+        ]
 
     def test_empty_is_an_empty_array(self) -> None:
         # [] is a complete answer ("no persist domains"), not a missing one.
-        assert persist_discovery_value([]) == "[]"
+        assert persist_discovery_value({}) == "[]"
 
     def test_apex_names_match_discovery_rows(self) -> None:
         # The apex-count metric is len() of these, so it must equal the rows.
         persist = [_domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu")]
         names = persist_apex_names(persist)
         assert names == ["a.example.edu", "b.example.edu"]
-        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(persist))] == names
+        expected = persist_expected_by_apex(persist, [_PERSIST_VALUE] * 3)
+        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(expected.values))] == names
 
 
 def _order(

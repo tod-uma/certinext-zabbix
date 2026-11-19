@@ -21,9 +21,10 @@ Three metric families, matching the three designed checks:
   for token-method domains, how many expire within the renewal lead time
   and the minimum days left; for ``DNS-PERSIST`` domains, only the minimum
   days left of the reuse period, plus an LLD list of their apexes so Zabbix
-  agent items can check the ``_validation-persist`` TXT record itself, and
-  the record value the CA expects there, so the template can catch a stale
-  ``{$CERTINEXT.PERSIST.EXPECTED}`` (:func:`persist_expected_value`).
+  agent items can check the ``_validation-persist`` TXT record itself. Each
+  row carries the record value the CA's API says to publish there
+  (``{#PERSIST.EXPECTED}``, :func:`persist_expected_by_apex`), so nobody
+  hand-maintains it in Zabbix (certinext-zabbix#12).
   Pushed only when the caller opts in (daily run).
 - **Order-health metrics** (one unfiltered Orders Report list call, split
   client-side by :func:`bucket_orders`): orders the CA never issued a
@@ -38,7 +39,7 @@ Three metric families, matching the three designed checks:
 
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import NamedTuple
@@ -70,7 +71,6 @@ KEY_PERSIST_DISCOVERY = "certinext.dcv.persist.discovery"
 KEY_TOKEN_DOMAINS = "certinext.dcv.token_domains"
 KEY_PERSIST_MIN_DAYS_LEFT = "certinext.dcv.persist_min_days_left"
 KEY_PERSIST_APEXES = "certinext.dcv.persist_apexes"
-KEY_PERSIST_EXPECTED = "certinext.dcv.persist_expected"
 
 ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
@@ -81,6 +81,12 @@ ENV_SANDBOX = "sandbox"
 # reuse clock — the CA re-reads the _validation-persist TXT record at the
 # next issuance — so its record, not its date, is what has to be watched.
 DCV_METHOD_PERSIST = "DNS-PERSIST"
+
+# Sent as an apex's {#PERSIST.EXPECTED} when the CA gave no usable value for
+# it. No real TXT record contains this string, so the apex's "record
+# missing" trigger fires (fail closed) and its description shows this text,
+# which points at the pusher log rather than at DNS.
+PERSIST_VALUE_UNAVAILABLE = "NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG"
 
 MetricValue = int | float | str
 """A trapper item value: numeric metrics, plus the TEXT env and LLD items."""
@@ -313,34 +319,39 @@ def persist_apex_names(persist: Sequence[Domain]) -> list[str]:
     return sorted({d.name for d in persist if d.name})
 
 
-def persist_discovery_value(persist: Sequence[Domain]) -> str:
+def persist_discovery_value(expected_by_apex: Mapping[str, str]) -> str:
     """Build the LLD JSON for :data:`KEY_PERSIST_DISCOVERY`.
 
-    One ``{#APEX}`` row per distinct domain name, sorted so the value is
-    stable between runs. The template's agent item prototypes look up
-    ``_validation-persist.{#APEX}`` from it. Callers must pass the
-    *complete* persist list: Zabbix treats an apex missing from the value
-    as a lost resource and deletes its items after the rule's grace period.
+    One row per apex, sorted so the value is stable between runs. The
+    template's agent item prototypes look up ``_validation-persist.{#APEX}``
+    and its trigger prototypes match the TXT answer against
+    ``{#PERSIST.EXPECTED}``. Callers must pass *every* persist apex: Zabbix
+    treats an apex missing from the value as a lost resource and deletes
+    its items after the rule's grace period.
 
     Args:
-        persist: Every DNS-PERSIST domain in scope
-            (:attr:`DcvMethodSplit.persist`).
+        expected_by_apex: :attr:`PersistExpected.values`, one entry per
+            apex from :func:`persist_apex_names`.
 
     Returns:
-        A JSON array, e.g. ``[{"{#APEX}": "example.edu"}]``; ``[]`` when there
-        are none, which tells Zabbix the set is genuinely empty.
+        A JSON array, e.g.
+        ``[{"{#APEX}": "example.edu", "{#PERSIST.EXPECTED}": "ssl.com; …"}]``;
+        ``[]`` when there are none, which tells Zabbix the set is genuinely
+        empty.
     """
-    return json.dumps([{"{#APEX}": name} for name in persist_apex_names(persist)])
+    return json.dumps([
+        {"{#APEX}": apex, "{#PERSIST.EXPECTED}": expected_by_apex[apex]}
+        for apex in sorted(expected_by_apex)
+    ])
 
 
 def normalise_persist_value(raw: str | None) -> str:
-    """Normalise a dns-persist record value to the macro's unquoted form.
+    """Normalise a dns-persist record value to the unquoted form the template matches.
 
-    ``{$CERTINEXT.PERSIST.EXPECTED}`` holds the value without its TXT quotes
-    (the template's ``find()`` adds them), so the value sent for the drift
-    trigger must be bare too. The API returns it bare today; one pair of
-    surrounding double quotes is stripped anyway, so a CA that starts
-    quoting it doesn't open a false drift alert.
+    ``{#PERSIST.EXPECTED}`` holds the value without its TXT quotes (the
+    template's ``find()`` adds them). The API returns it bare today; one
+    pair of surrounding double quotes is stripped anyway, so a CA that
+    starts quoting it doesn't make every apex alert.
 
     Args:
         raw: The wire ``recordValue``, or ``None``.
@@ -365,7 +376,8 @@ def persist_record_value(info: DcvInfo) -> str:
     domains reach this). Options listed without a persist entry contradict
     the method, so the top-level value, which may be another option's
     token, is not trusted. Never raises: a missing value is ``""``, which
-    :func:`persist_expected_value` refuses to send.
+    :func:`persist_expected_by_apex` replaces with
+    :data:`PERSIST_VALUE_UNAVAILABLE`.
 
     Args:
         info: A ``get_dcv()`` result whose method is ``DNS-PERSIST``.
@@ -384,37 +396,45 @@ def persist_record_value(info: DcvInfo) -> str:
     return normalise_persist_value(raw if isinstance(raw, str) else None)
 
 
-class PersistExpectedError(ValueError):
-    """The persist domains don't yield one usable record value to send.
-
-    Raised by :func:`persist_expected_value` when a value is missing or the
-    apexes disagree. The caller sends nothing for
-    :data:`KEY_PERSIST_EXPECTED` (fail closed) and the item's ``nodata()``
-    trigger reports the gap.
+class PersistExpected(NamedTuple):
+    """Each persist apex's expected TXT value, from :func:`persist_expected_by_apex`.
 
     Attributes:
-        apexes_by_value: Each distinct value (``""`` for missing) mapped to
-            the sorted domain names that returned it, for the log.
+        values: Apex name to the value its discovery row carries as
+            ``{#PERSIST.EXPECTED}``; :data:`PERSIST_VALUE_UNAVAILABLE` for an
+            apex listed in *problems*. Keys are exactly
+            :func:`persist_apex_names`, so no apex is ever left out of
+            discovery.
+        problems: Apex name to why the CA's value could not be used. Empty
+            on a clean run; non-empty means the caller should log it and
+            exit non-zero.
     """
 
-    def __init__(self, message: str, apexes_by_value: dict[str, list[str]]) -> None:
-        """Store the message and the per-value breakdown.
-
-        Args:
-            message: Why no value can be sent.
-            apexes_by_value: Distinct value to the domains that returned it.
-        """
-        super().__init__(message)
-        self.apexes_by_value = apexes_by_value
+    values: dict[str, str]
+    problems: dict[str, str]
 
 
-def persist_expected_value(persist: Sequence[Domain], values: Sequence[str]) -> str | None:
-    """Return the one dns-persist record value the CA expects, for the drift check.
+# A double quote or backslash would have to survive LLD substitution into a
+# quoted trigger-function parameter. Real dns-persist values never contain
+# either, so refusing them beats depending on Zabbix's escaping rules.
+_UNSAFE_PERSIST_CHARS = ('"', "\\")
 
-    The value is per CertiNext account, so every persist apex in one
-    environment should report the same string. ``{$CERTINEXT.PERSIST.EXPECTED}``
-    is one value per host (ADR 0014), so this never picks a winner among
-    different values: it fails closed instead (certinext-zabbix#12).
+
+def persist_expected_by_apex(
+    persist: Sequence[Domain], values: Sequence[str],
+) -> PersistExpected:
+    """Map each persist apex to the TXT value the CA's API says to publish.
+
+    The value goes into that apex's discovery row as ``{#PERSIST.EXPECTED}``
+    and the template's DNS triggers match against it, so Zabbix follows the
+    CA without a hand-set macro (certinext-zabbix#12). Each apex uses its
+    own value, so nothing assumes the value is account-wide.
+
+    Fail closed, per apex: when the CA gave no value, the apex's domain
+    records disagree, or the value holds a character a trigger string can't
+    carry safely, the apex still gets its row (so its checks are not
+    deleted) but with :data:`PERSIST_VALUE_UNAVAILABLE`, which no TXT record
+    matches, and the reason goes to *problems*.
 
     Args:
         persist: The persist domains (:attr:`DcvMethodSplit.persist`).
@@ -422,30 +442,31 @@ def persist_expected_value(persist: Sequence[Domain], values: Sequence[str]) -> 
             (:attr:`DcvMethodSplit.persist_values`).
 
     Returns:
-        The shared value, or ``None`` when there are no persist domains
-        (nothing to compare; not an error).
+        The per-apex values and any problems.
 
     Raises:
-        PersistExpectedError: When any domain has no value, or the domains
-            report more than one distinct value.
         ValueError: When *persist* and *values* differ in length.
     """
-    by_value: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
     for d, v in zip(persist, values, strict=True):
-        by_value.setdefault(v, []).append(d.name or "(unnamed)")
-    by_value = {v: sorted(names) for v, names in by_value.items()}
-    if not by_value:
-        return None
-    if "" in by_value:
-        raise PersistExpectedError(
-            "CA returned no DNS-PERSIST record value for some persist domains", by_value,
-        )
-    if len(by_value) > 1:
-        raise PersistExpectedError(
-            "persist domains report different DNS-PERSIST record values", by_value,
-        )
-    (value,) = by_value
-    return value
+        if d.name:
+            seen.setdefault(d.name, set()).add(v)
+    result = PersistExpected(values={}, problems={})
+    for apex in persist_apex_names(persist):
+        candidates = seen[apex]
+        value = next(iter(candidates)) if len(candidates) == 1 else ""
+        if len(candidates) > 1:
+            problem = f"domain records disagree on the DNS-PERSIST value: {sorted(candidates)}"
+        elif not value:
+            problem = "CA returned no DNS-PERSIST record value"
+        elif any(c in value for c in _UNSAFE_PERSIST_CHARS):
+            problem = f"DNS-PERSIST value contains a double quote or backslash: {value!r}"
+        else:
+            result.values[apex] = value
+            continue
+        result.values[apex] = PERSIST_VALUE_UNAVAILABLE
+        result.problems[apex] = problem
+    return result
 
 
 def verified_domains(domains: Sequence[Domain]) -> list[Domain]:

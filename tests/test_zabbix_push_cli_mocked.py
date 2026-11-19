@@ -16,7 +16,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
-import pytest
 import structlog
 from certinext.cli_support import TRACEBACK_HINT, LogFormat, LogMode
 from certinext.orders import OrderRecord
@@ -24,7 +23,7 @@ from typer.testing import CliRunner
 from zabbix_utils.exceptions import ProcessingError
 
 from certinext_zabbix._cli_shared import run_lock
-from certinext_zabbix.zabbix_push import DomainScope
+from certinext_zabbix.zabbix_push import PERSIST_VALUE_UNAVAILABLE, DomainScope
 from certinext_zabbix.zabbix_push_cli import app
 
 runner = CliRunner()
@@ -411,7 +410,8 @@ class TestExpiryPath:
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
         assert json.loads(metrics["certinext.dcv.persist.discovery"]) == [
-            {"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"},
+            {"{#APEX}": "a.example.edu", "{#PERSIST.EXPECTED}": _PERSIST_VALUE},
+            {"{#APEX}": "b.example.edu", "{#PERSIST.EXPECTED}": _PERSIST_VALUE},
         ]
         assert metrics["certinext.dcv.persist_apexes"] == 2
         # Only the token domain feeds the token metrics.
@@ -451,54 +451,41 @@ class TestExpiryPath:
         assert metrics["certinext.domains.total"] == 2
         assert metrics["certinext.env"] == "prod"
 
-    def test_persist_expected_sent_when_apexes_agree(self) -> None:
+    def test_each_row_carries_its_own_ca_value(self) -> None:
+        # Per apex, quotes normalised; no account-wide value assumed (#12).
+        other = "other.example; accounturi=https://other.example.invalid/acct/2"
         domains = [
-            _verified_domain("a.example.edu", method="DNS-PERSIST"),
-            _verified_domain("b.example.edu", method="DNS-PERSIST", persist_value=f'"{_PERSIST_VALUE}"'),
+            _verified_domain("a.example.edu", method="DNS-PERSIST", persist_value=f'"{_PERSIST_VALUE}"'),
+            _verified_domain("b.example.edu", method="DNS-PERSIST", persist_value=other),
         ]
         result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
         assert result.exit_code == 0
         (metrics,) = mocks.push.call_args.args
-        # Quotes normalised away, so both apexes agree.
-        assert metrics["certinext.dcv.persist_expected"] == _PERSIST_VALUE
+        rows = json.loads(metrics["certinext.dcv.persist.discovery"])
+        assert {r["{#APEX}"]: r["{#PERSIST.EXPECTED}"] for r in rows} == {
+            "a.example.edu": _PERSIST_VALUE, "b.example.edu": other,
+        }
+        assert not any(k.startswith("certinext.dcv.persist_expected") for k in metrics)
 
-    def test_no_persist_domains_sends_no_expected_value(self) -> None:
-        result, mocks = _run(argv=["--expiry-days", "14"], domains=[_verified_domain("t.example.edu")])
-        assert result.exit_code == 0
-        (metrics,) = mocks.push.call_args.args
-        assert "certinext.dcv.persist_expected" not in metrics
-
-    @pytest.mark.parametrize("second_value", [
-        "other.example; accounturi=https://other.example.invalid/acct/2", "",
-    ])
-    def test_mixed_or_missing_value_fails_closed_but_keeps_discovery(self, second_value: str) -> None:
+    def test_missing_value_fails_closed_per_apex_but_keeps_discovery(self) -> None:
         later = datetime.now(timezone.utc) + timedelta(days=5)
         domains = [
             _verified_domain("a.example.edu", expires=later, method="DNS-PERSIST"),
-            _verified_domain("b.example.edu", expires=later, method="DNS-PERSIST", persist_value=second_value),
+            _verified_domain("b.example.edu", expires=later, method="DNS-PERSIST", persist_value=""),
         ]
         result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
         assert result.exit_code == 1
         (metrics,) = mocks.push.call_args.args
-        # Never pick one, never send an empty string.
-        assert "certinext.dcv.persist_expected" not in metrics
-        # The value read must not withhold discovery or expiry metrics.
+        rows = json.loads(metrics["certinext.dcv.persist.discovery"])
+        # b keeps its row (and so its checks) but can never match DNS.
+        assert {r["{#APEX}"]: r["{#PERSIST.EXPECTED}"] for r in rows} == {
+            "a.example.edu": _PERSIST_VALUE, "b.example.edu": PERSIST_VALUE_UNAVAILABLE,
+        }
         assert metrics["certinext.dcv.persist_apexes"] == 2
-        assert "certinext.dcv.persist.discovery" in metrics
         assert "certinext.dcv.persist_min_days_left" in metrics
-        assert any(
-            c.args and c.args[0] == "Skipping dns-persist expected value"
-            for c in mocks.log.error.call_args_list
-        )
-
-    def test_dcv_method_failure_also_withholds_expected_value(self) -> None:
-        bad = _verified_domain("bad.example.edu", method="DNS-PERSIST")
-        bad.get_dcv.side_effect = RuntimeError("api down")
-        good = _verified_domain("good.example.edu", method="DNS-PERSIST")
-        result, mocks = _run(argv=["--expiry-days", "14"], domains=[bad, good])
-        assert result.exit_code == 1
-        (metrics,) = mocks.push.call_args.args
-        assert "certinext.dcv.persist_expected" not in metrics
+        errors = [c for c in mocks.log.error.call_args_list
+                  if c.args and c.args[0].startswith("No usable dns-persist value")]
+        assert [c.kwargs["apex"] for c in errors] == ["b.example.edu"]
 
     def test_refresh_failure_still_sends_complete_discovery(self) -> None:
         # The method split was complete, so the discovery list is too; only
@@ -509,7 +496,7 @@ class TestExpiryPath:
         assert result.exit_code == 1
         (metrics,) = mocks.push.call_args.args
         assert json.loads(metrics["certinext.dcv.persist.discovery"]) == [
-            {"{#APEX}": "bad.example.edu"},
+            {"{#APEX}": "bad.example.edu", "{#PERSIST.EXPECTED}": _PERSIST_VALUE},
         ]
         assert "certinext.dcv.persist_min_days_left" not in metrics
 

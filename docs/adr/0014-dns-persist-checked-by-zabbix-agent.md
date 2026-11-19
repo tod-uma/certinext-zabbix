@@ -73,22 +73,20 @@ discovery rule creates, per apex, three passive agent items
 | `{$CERTINEXT.DNS.RESOLVER.1}` (1.1.1.1), `RESOLVER.2` (8.8.8.8) | `DNS.INTERVAL.EXTERNAL` (1h) | not visible publicly: no match in the last 2 values on either; depends on "record missing" | AVERAGE |
 | all three | `DNS.NODATA` (3h) | lookup failing: `nodata()` on any of them | AVERAGE |
 
-- A match is `find(…,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")`:
-  the exact value, inside its quotes, as agent2 returns it
+- A match is `find(…,"like","\"{#PERSIST.EXPECTED}\"")`: the exact
+  value, inside its quotes, as agent2 returns it
   (`<name> TXT "<value>"`, verified on agent2 7.0.31). Each `find()` is
   gated on `count(…,#N)>=N`, so a newly discovered apex needs a full
   window (3 local or 2 public lookups) before it can alert;
   `find(…,#3)` alone evaluates on however many values exist.
-- `{$CERTINEXT.PERSIST.EXPECTED}` defaults to `CONFIGURE-ME` and so
-  **fails closed**: every apex alerts until the host macro holds the real
-  value. The value lives only in host macros, because this repo mirrors
-  publicly. It is **one value per host, with no per-apex override**.
-  0.2.0rc1 used the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}`,
-  but an unquoted context ends at the first `}`, so Zabbix 7.0 parsed it
-  as context `{#APEX` plus a stray `}`. LLD never substituted it, and
-  every apex alerted on its first lookup (session 4, live). The value is
-  per CertiNext account, the same for every apex in an environment, so
-  the override was only ever wanted for the negative test.
+- **The expected value comes from the CA, never from a person**
+  (amended 2026-11-19, certinext-zabbix#12; see below). Up to 0.2.0rc2 it
+  was a hand-set host macro, `{$CERTINEXT.PERSIST.EXPECTED}`. 0.2.0rc1
+  used the context form `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}`, but an
+  unquoted context ends at the first `}`, so Zabbix 7.0 parsed it as
+  context `{#APEX` plus a stray `}`. LLD never substituted it, and every
+  apex alerted on its first lookup (session 4, live). rc2 fell back to the
+  plain host macro, one value per host.
 - Preprocessing maps only `^Cannot perform DNS query` (agent2's error for a
   missing name) to an empty value, so "record missing" fires. Other errors,
   such as a resolver timeout, stay unsupported, so they surface as "lookup
@@ -109,35 +107,44 @@ checks. This came out of the R1 external review (Codex), which noted that
 discovery is only as complete as the CertiNext domain list. That list
 raises on HTTP errors but would end quietly on a short page.
 
-**A stale `EXPECTED` is alerted** (amended 2026-11-18,
-certinext-zabbix#12). The `get_dcv()` call that reads each domain's
-method also returns its DNS-PERSIST option's record value, so the daily
-run sends it, unquoted, to the text trapper
-`certinext.dcv.persist_expected`. No extra API calls are needed. An
-AVERAGE trigger fires on
-`last(persist_expected)<>"{$CERTINEXT.PERSIST.EXPECTED}"`, gated on
-`persist_apexes>0`, and a WARNING `nodata()` on the item (same gate)
-reports a withheld value.
+**The pusher supplies the expected value per apex** (amended
+2026-11-19, certinext-zabbix#12; Tod: nobody hand-sets it). The
+`get_dcv()` call that reads each domain's method also returns its
+DNS-PERSIST option's record value, so each discovery row carries it as
+`{#PERSIST.EXPECTED}`, unquoted:
+`[{"{#APEX}": "example.edu", "{#PERSIST.EXPECTED}": "ssl.com; …"}]`. No
+extra API calls. `{$CERTINEXT.PERSIST.EXPECTED}` is gone, with no test
+override.
 
-- It catches what the matcher can't: a CA-side change, such as a new
-  account URI. DNS and the macro still agree, so "record missing" stays
-  quiet, but the next issuance fails DCV. A wrong macro raises it too,
-  next to "record missing" on every apex, and its operational data shows
-  the CA's value to copy.
+- A CA-side change, such as a new account URI, now reaches Zabbix with
+  the next daily run. LLD rewrites the discovered triggers, the stored
+  TXT values stop matching, and "record missing" fires on every affected
+  apex within a lookup or two. That is the right alert: DNS must be
+  republished before the next issuance. A separate drift trigger would
+  only repeat it.
 - It is not the circular check this ADR rules out: the value comes from
-  the CA's API, not from DNS.
-- The matcher is unchanged. The host macro inside the quoted `find()` is
-  proven live (rc2) and is the knob the negative test turns.
-- **Fail closed.** The value is per account and the macro is one per
-  host, so the pusher never picks among different values. If any persist
-  apex returns no value, or they disagree, it sends nothing, logs the
-  apexes per value and exits 1. That read never moves a domain to
-  `failed`, so it can't hold back discovery or the expiry items. A method
-  read failure withholds it along with everything else. Surrounding
-  quotes are stripped; the API returns the value bare today.
-- AVERAGE, not WARNING: the case only this trigger sees is a silent
-  issuance failure waiting to happen. Not HIGH: "record missing" already
-  pages HIGH for the common case, a mistyped macro.
+  the CA's API, the record from DNS.
+- **Per apex, fail closed.** Each apex uses its own value; nothing assumes
+  the value is account-wide. When the CA gives an apex no value, its
+  domain records disagree, or the value holds `"` or `\` (which would have
+  to survive LLD substitution into a quoted function parameter), the apex
+  still gets its row, so its checks aren't deleted, but with the
+  placeholder `NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG`.
+  No record matches it, so the apex alerts as "record missing", and the
+  trigger description names the placeholder. The pusher logs
+  `No usable dns-persist value from the CA — apex will alert` per apex
+  and exits 1. A method-read failure still withholds discovery entirely,
+  as above.
+- The value read never moves a domain to `failed`, so it can't hold back
+  discovery or the expiry items. One pair of surrounding quotes is
+  stripped; the API returns the value bare today.
+- Considered and rejected (2026-11-19): the pusher setting the host macro
+  through the Zabbix API (a new write-capable Zabbix credential on the
+  pusher host); comparing two items inside `find()` (its pattern must be
+  a constant or macro, not a function result); and the 2026-11-18 build
+  of #12, which kept the hand-set macro and added a drift trigger against
+  a `certinext.dcv.persist_expected` trapper. That build was never
+  released and is replaced by this one.
 
 ### Why LLD here, when ADR 0011 rejected it for the CA dimension
 
@@ -156,7 +163,8 @@ risk here, items deleted after a partial list, is handled by the
 - Good: the standing every-cycle WARNINGs on dns-persist domains stop,
   without losing the gradient for token-method domains.
 - Good: no per-institution configuration. The method each domain uses
-  decides which alerts apply to it.
+  decides which alerts apply to it, and the CA's API decides the expected
+  record value (#12).
 - Bad: each host needs an agent interface on the pusher machine, and that
   machine needs outbound DNS (port 53) to the two public resolvers.
 - Bad: the first discovery needs one daily run, and the dropped-apex
@@ -195,16 +203,19 @@ risk here, items deleted after a partial list, is handled by the
   what debounces a real miss.
 - Still to run, live: the misroute test, and a dead `RESOLVER.1` that
   raises "lookup failing" and not "record missing".
-- certinext-zabbix#12 (the `EXPECTED` drift check above):
-  `tests/test_template.py` checks the drift and `nodata()` triggers and
-  their gate; the pusher tests cover fail-closed (a missing or mixed value
-  sends nothing, and discovery and expiry still go out). The substitution
-  it relies on, a host macro inside a string constant compared with a
-  text item's `last()`, already runs live: the misroute trigger on the
-  sandbox host evaluates `<>"sandbox"` (a host-level override) and has
-  stayed OK against stored `sandbox` values (API read, 2026-11-18). Still
-  to run, live, before release: import plus one daily push on 7.0
-  (closed with the right macro, open with a wrong one).
+- certinext-zabbix#12 (the pusher-supplied value above):
+  `tests/test_template.py` checks that every persist `find()` pattern is
+  exactly `"\"{#PERSIST.EXPECTED}\""` and that no
+  `{$CERTINEXT.PERSIST.EXPECTED}` remains; the pusher tests cover the
+  per-apex value, the placeholder for a missing, conflicting or unsafe
+  value, and that every apex keeps its row. **Not yet proven live:** that
+  Zabbix 7.0 substitutes an LLD macro inside a quoted `find()` parameter.
+  rc1's break was a different construct (an LLD macro as an unquoted
+  user-macro context), so it isn't disproven, only untested. Before
+  release: import, one daily push, then read the discovered triggers back
+  through the API (expression shows the CA's value; problems close). The
+  negative test becomes a real record change in sandbox, since the macro
+  knob is gone.
 
 ## Pros and cons of the options
 

@@ -61,18 +61,14 @@ follow the upgrade section of the root repo's
    - `{$CERTINEXT.ENV}`: `prod` or `sandbox`. Defaults to `prod`, so a
      sandbox host left at the default raises the misroute trigger on its
      first run.
-   - `{$CERTINEXT.PERSIST.EXPECTED}`: the exact value of that
-     environment's `_validation-persist` TXT record, **without** the
-     surrounding quotes. The default, `CONFIGURE-ME`, matches nothing, so
-     every discovered apex alerts until this is set. Keep the real value in
-     host macros rather than editing the template. Take the value from
-     CertiNext: it is the `DNS-PERSIST` option's record value in a domain's
-     DCV detail (`certinext-domains get-dcv <apex> --validated-by SSLCOM`).
-     It names the CertiNext account, so one value covers every apex in an
-     environment, and prod and sandbox differ. Don't copy it from the
-     published TXT record, which would make the check circular.
    - `{$CERTINEXT.SENDER.ALLOWED}`: the pusher machine's source IP(s). The
      committed `127.0.0.1` rejects every real sender.
+
+   There is no macro for the expected `_validation-persist` value: the
+   daily run sends it per apex from the CA's API (see
+   [dns-persist discovery](#dns-persist-discovery)). Upgrading from
+   0.2.0rc2 or earlier, delete any `{$CERTINEXT.PERSIST.EXPECTED}` host
+   macro; nothing reads it.
 4. **Schedule the pusher** for each environment: a frequent run (domain
    totals; the reference deployment uses every 6 hours), an hourly run
    with `--order-health`, and a daily run with `--expiry-days` (DCV expiry
@@ -91,7 +87,6 @@ follow the upgrade section of the root repo's
 | Macro | Default | Meaning |
 | --- | --- | --- |
 | `{$CERTINEXT.ENV}` | `prod` | **Set on each host.** The environment whose pusher runs target this host. Used in names and the `env` tag, and compared against the `certinext.env` value each run sends. |
-| `{$CERTINEXT.PERSIST.EXPECTED}` | `CONFIGURE-ME` | **Set on each host.** Exact `_validation-persist` TXT value, unquoted: the full string (`ssl.com; accounturi=https://…`), not just the CA or API hostname. One value per host, no per-apex override. Fails closed. Checked daily against the CA's own value (`persist_expected`). |
 | `{$CERTINEXT.SENDER.ALLOWED}` | `127.0.0.1` | **Must override.** Source IP(s) of the pusher machine. Trapper items and the discovery rule reject any other sender. |
 | `{$CERTINEXT.DCV.WARN_DAYS}` | `3` | WARNING when the soonest **token-method** DCV expiry is within this many days. Sized for a ~10-day DCV window; for a CA with long windows (emSign's were about a year) raise `WARN_DAYS`/`AVG_DAYS` (the 0.1.0 defaults were `14`/`7`). DNS-PERSIST domains never reach these triggers. |
 | `{$CERTINEXT.DCV.AVG_DAYS}` | `2` | AVERAGE threshold (days), token-method domains. |
@@ -124,7 +119,6 @@ Trapper items, all pushed by `certinext-zabbix-push`:
 | `certinext.dcv.min_days_left` | Float (days) | daily | Days to the soonest token-method DCV expiry; negative once lapsed. Not sent when `token_domains` is 0. |
 | `certinext.dcv.persist_min_days_left` | Float (days) | daily | Days to the soonest DNS-PERSIST `validTill`. A reuse clock, not a deadline: the CA re-checks DNS at the next issuance. Not sent without persist domains. |
 | `certinext.dcv.persist_apexes` | Unsigned | daily | Number of apexes in the dns-persist discovery value; sent only with it. |
-| `certinext.dcv.persist_expected` | Text | daily | The `_validation-persist` value the CA's API says to publish (the DNS-PERSIST option's record value), unquoted. Sent only when every persist apex reports the same value; never empty. |
 | `certinext.orders.unissued` | Unsigned | hourly | Orders accepted but not yet generated: still in approval, DCV, CSR, documents or agreement. |
 | `certinext.orders.undownloaded` | Unsigned | hourly | Certificates generated but never downloaded: a delivery or automation failure. |
 | `certinext.orders.failed_recent` | Unsigned | hourly | Orders in a terminal non-fulfilled state within `--order-failing-lookback-days` (default 30). Cancellations excluded ([ADR 0010](../../../docs/adr/0010-cancelled-orders-are-not-failures.md)). |
@@ -142,11 +136,15 @@ method read fails, the run sends none of the daily items, so a partial
 apex list never reaches the discovery rule.
 
 **The CA's persist value.** The same method read returns each persist
-domain's DNS-PERSIST record value, which the run sends as
-`persist_expected` for the drift trigger. It fails closed: if any apex
-returns no value, or the apexes disagree, the run sends nothing for it,
-logs `Skipping dns-persist expected value` with the apexes per value and
-exits 1. Discovery and the expiry items still go out.
+domain's DNS-PERSIST record value, which the run puts in that apex's
+discovery row as `{#PERSIST.EXPECTED}` (no extra API calls). It fails
+closed per apex: if the CA returns no value, the apex's records disagree,
+or the value contains `"` or `\`, the row carries
+`NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG` instead, so that
+apex alerts as "record missing". The run logs
+`No usable dns-persist value from the CA — apex will alert` with the apex
+and reason, and exits 1. Every other apex and the expiry items still go
+out.
 
 Neither order count is named "pending": the vendor's `status` enum uses
 `pending-*` for the whole pre-fulfillment space, which spans `unissued`
@@ -168,8 +166,13 @@ See [ADR 0011](../../../docs/adr/0011-dcv-metrics-single-ca-by-flag.md).
 ## dns-persist discovery
 
 Discovery rule `certinext.dcv.persist.discovery` (trapper, same allowed
-hosts as the items) receives `[{"{#APEX}": "example.edu"}, …]` from each
-daily run. Lost apexes' items are deleted after **3 days** and are never
+hosts as the items) receives
+`[{"{#APEX}": "example.edu", "{#PERSIST.EXPECTED}": "ssl.com; accounturi=…"}, …]`
+from each daily run. `{#PERSIST.EXPECTED}` is the record value the CA's
+API says to publish for that apex, unquoted (the triggers add the
+quotes). When the CA changes it, the next daily run rewrites the
+discovered triggers and every affected apex raises "record missing" until
+DNS is republished. Lost apexes' items are deleted after **3 days** and are never
 disabled first. Per apex it creates three passive agent items (text,
 7 days' history):
 
@@ -189,7 +192,7 @@ in the local item, never as "record missing". `{$CERTINEXT.DNS.NODATA}`
 
 ## Triggers
 
-18 static triggers per host, plus 3 trigger prototypes per discovered
+16 static triggers per host, plus 3 trigger prototypes per discovered
 apex.
 
 | Trigger | Severity | Fires on |
@@ -205,8 +208,6 @@ apex.
 | DCV expires within `{$CERTINEXT.DCV.WARN_DAYS}` days | WARNING | Same, ≤ `WARN_DAYS`; depends on AVERAGE. |
 | dns-persist reuse period lapsed | INFORMATION | `persist_min_days_left` ≤ 0: the next issuance re-checks DNS. Informational; the DNS checks below are the real alert. |
 | dns-persist apex count dropped | WARNING, manual close | `persist_apexes` below its maximum over the last 4 days (the rule's 3-day lifetime plus one daily run), so it opens before Zabbix deletes the dropped apexes' checks. A deliberate removal also raises it once. |
-| dns-persist EXPECTED differs from the CA's value | AVERAGE | `persist_expected` ≠ `{$CERTINEXT.PERSIST.EXPECTED}` and `persist_apexes` > 0. A wrong macro raises it alongside "record missing" on every apex; a CA-side change (e.g. a new account URI) raises it alone, since DNS still matches the macro. Shows the CA's value as operational data. |
-| no dns-persist expected value from pusher | WARNING | `nodata()` on `persist_expected` for `{$CERTINEXT.NODATA.DAILY}` and `persist_apexes` > 0: the pusher withheld the value (missing or mixed), so the drift check is blind. |
 | order(s) stuck awaiting issuance | AVERAGE | `unissued` > 0 for the whole of `{$CERTINEXT.ORDER.STUCK_AGE}`. |
 | no data from pusher (hourly order-health run) | WARNING | `nodata()` on `unissued` for `{$CERTINEXT.NODATA.ORDER_HEALTH}`. |
 | certificate(s) generated but never downloaded | WARNING | `undownloaded` > 0 for the whole of `{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}`. |
@@ -217,7 +218,7 @@ Per discovered apex:
 
 | Trigger prototype | Severity | Fires on |
 | --- | --- | --- |
-| dns-persist record missing for `{#APEX}` | HIGH | At least 3 local lookups exist and none of the last 3 contains `"{$CERTINEXT.PERSIST.EXPECTED}"` (quotes included). |
+| dns-persist record missing for `{#APEX}` | HIGH | At least 3 local lookups exist and none of the last 3 contains `"{#PERSIST.EXPECTED}"` (quotes included), the CA's value for that apex. |
 | dns-persist record for `{#APEX}` not visible publicly | AVERAGE | Either public resolver has at least 2 lookups and its last 2 lack the value. Depends on "record missing", so a record gone everywhere raises only the HIGH. |
 | dns-persist TXT lookup failing for `{#APEX}` | AVERAGE | `nodata()` on any of the three lookups for `{$CERTINEXT.DNS.NODATA}`: a resolver or the agent is failing, not the record. |
 

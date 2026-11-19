@@ -88,14 +88,12 @@ from .zabbix_push import (
     KEY_ORDERS_UNISSUED,
     KEY_PERSIST_APEXES,
     KEY_PERSIST_DISCOVERY,
-    KEY_PERSIST_EXPECTED,
     KEY_PERSIST_MIN_DAYS_LEFT,
     KEY_TOKEN_DOMAINS,
     KEY_UNVERIFIED,
     DomainScope,
     MetricValue,
     OrderBuckets,
-    PersistExpectedError,
     bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
@@ -104,7 +102,7 @@ from .zabbix_push import (
     fetch_orders,
     persist_apex_names,
     persist_discovery_value,
-    persist_expected_value,
+    persist_expected_by_apex,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -202,7 +200,7 @@ def run(
             "domains whose DCV expires within DAYS days and their minimum days "
             "left; the minimum days left of DNS-PERSIST reuse periods; and the "
             "LLD list of DNS-PERSIST apexes whose TXT records Zabbix checks, "
-            "plus the record value the CA expects in them. "
+            "each with the record value the CA expects there. "
             "Reads every scoped domain's DCV method and every verified domain's "
             "details (two API calls per domain, expensive) — schedule on its own "
             "daily run, not more often. Disabled by default."
@@ -418,28 +416,24 @@ def run(
                 )
             else:
                 # The method split is complete, so the discovery list is
-                # too — send it even if a detail refresh fails below.
-                metrics[KEY_PERSIST_DISCOVERY] = persist_discovery_value(split.persist)
+                # too — send it even if a detail refresh fails below. Each
+                # row carries the CA's record value for that apex (#12). An
+                # apex without a usable value keeps its row, with a
+                # never-matching placeholder, so it alerts as "record
+                # missing" rather than losing its checks.
+                expected = persist_expected_by_apex(split.persist, split.persist_values)
+                for apex, problem in expected.problems.items():
+                    had_errors = True
+                    log.error(
+                        "No usable dns-persist value from the CA — apex will alert",
+                        apex=apex, reason=problem,
+                    )
+                metrics[KEY_PERSIST_DISCOVERY] = persist_discovery_value(expected.values)
                 # Sent with the list, never without it: the template alerts
                 # when this drops below its recent maximum, which catches a
                 # silently partial domain list before Zabbix deletes the
                 # missing apexes' checks (and a deliberate removal, once).
                 metrics[KEY_PERSIST_APEXES] = len(persist_apex_names(split.persist))
-                # The CA's record value, for the template's drift trigger
-                # against {$CERTINEXT.PERSIST.EXPECTED} (#12). Fail closed:
-                # a missing or disagreeing value sends nothing (nodata()
-                # reports it) but never holds back discovery or expiry.
-                try:
-                    expected = persist_expected_value(split.persist, split.persist_values)
-                except PersistExpectedError as exc:
-                    had_errors = True
-                    log.error(
-                        "Skipping dns-persist expected value",
-                        reason=str(exc), apexes_by_value=exc.apexes_by_value,
-                    )
-                else:
-                    if expected is not None:
-                        metrics[KEY_PERSIST_EXPECTED] = expected
                 token_verified = verified_domains(split.token)
                 persist_verified = verified_domains(split.persist)
                 log.info(
