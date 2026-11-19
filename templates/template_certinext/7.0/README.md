@@ -139,7 +139,9 @@ apex list never reaches the discovery rule.
 domain's DNS-PERSIST record value, which the run puts in that apex's
 discovery row as `{#PERSIST.EXPECTED}` (no extra API calls). It fails
 closed per apex: if the CA returns no value, the apex's records disagree,
-or the value contains `"` or `\`, the row carries
+or the value can't sit literally in a trigger parameter (over 200
+characters, `"`, `\`, `{`, `}`, or anything but printable ASCII), the row
+carries
 `NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG` instead, so that
 apex alerts as "record missing". The run logs
 `No usable dns-persist value from the CA — apex will alert` with the apex
@@ -201,7 +203,7 @@ apex.
 | domain list is empty | WARNING | `total` = 0: likely an API regression, not a real empty account. |
 | domain(s) unverified too long | AVERAGE | `unverified` > 0 for the whole of `{$CERTINEXT.UNVERIFIED.MAX_AGE}`. |
 | no data from pusher (frequent run) | WARNING | `nodata()` on `unverified` for `{$CERTINEXT.NODATA.FAST}`. |
-| no data from pusher (daily expiry run) | WARNING | `nodata()` on `expiring` for `{$CERTINEXT.NODATA.DAILY}`. Also covers stale discovery: the pusher never sends daily items without it. |
+| no data from pusher (daily expiry run) | WARNING | `nodata()` on `expiring` for `{$CERTINEXT.NODATA.DAILY}`. Also covers discovery that stopped arriving (the pusher never sends daily items without it), but not discovery Zabbix failed to apply: check the discovery rule's error for that. |
 | DCV lapsed | DISASTER | `min_days_left` ≤ `{$CERTINEXT.DCV.DISASTER_DAYS}` and `token_domains` > 0. |
 | DCV expires within `{$CERTINEXT.DCV.HIGH_DAYS}` day(s) | HIGH | Same, ≤ `HIGH_DAYS`; depends on DCV lapsed. |
 | DCV expires within `{$CERTINEXT.DCV.AVG_DAYS}` days | AVERAGE | Same, ≤ `AVG_DAYS`; depends on HIGH. |

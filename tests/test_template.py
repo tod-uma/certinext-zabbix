@@ -289,6 +289,22 @@ class TestTriggers:
         assert len(patterns) == 3  # record missing, 2 x not visible publicly
         assert set(patterns) == {r'"\"{#PERSIST.EXPECTED}\""'}
 
+    def test_persist_find_alerts_on_absence(self, export: dict[str, Any]) -> None:
+        """Every dns-persist ``find()`` is compared ``=0``: alert when the value is absent.
+
+        ``=1`` would alert while the record is healthy and stay quiet when
+        it's gone, and the pattern test above would still pass (Codex R3
+        finding 3). Dependency copies are held equal to their trigger by
+        ``test_dependencies_match_a_trigger``.
+        """
+        comparisons = [
+            m.group(1)
+            for t in _all_triggers(export) if "_validation-persist" in t["expression"]
+            for m in re.finditer(r'find\([^)]*,"like","(?:\\.|[^"\\])*"\)([<>=]*\d*)', t["expression"])
+        ]
+        assert len(comparisons) == 3
+        assert comparisons == ["=0"] * 3
+
 
 class TestStructure:
     """Import-file details that Zabbix enforces on a hand-written file."""

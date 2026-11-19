@@ -456,9 +456,15 @@ order-health — alert after one missed hourly run is tolerated, a second
 alerts, via `{$CERTINEXT.NODATA.ORDER_HEALTH}` (3h); daily (expiry) —
 one missed daily run alerts, via `{$CERTINEXT.NODATA.DAILY}` (26h). If
 you change a timer's cadence materially, adjust the matching macro on the
-Zabbix side. The daily window also covers the dns-persist discovery: the
-pusher never sends the daily items without it, so a stale discovery list
-shows up as *no data from pusher (daily expiry run)*.
+Zabbix side. The daily window also covers *sending* the dns-persist
+discovery: the pusher never sends the daily items without it, so a
+discovery list that stopped arriving shows up as *no data from pusher
+(daily expiry run)*. It does not prove Zabbix *applied* the list: if LLD
+fails to create or update a discovered trigger, the push still succeeds
+and the old trigger can keep checking the old value. That error shows on
+the discovery rule itself (*Data collection → Hosts → Discovery*, the
+rule's *Info* column), so check it after a template import or a change in
+the CA's value.
 
 The dns-persist lookups are agent checks, not pusher data, with their own
 cadence: `{$CERTINEXT.DNS.INTERVAL.LOCAL}` (5m) and

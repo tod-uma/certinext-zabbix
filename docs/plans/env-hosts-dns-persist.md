@@ -403,6 +403,7 @@ working from this section alone.
 | R1 (agentic) | Codex coding agent (OpenAI); self-ID "GPT-6, exact model version unknown" | 2026-11-18 | `73bab0b` | `review/REVIEW-codex-R1.md` | session 3 |
 | R1 (paste-only) | Gemini web app, Gemini 3 Pro (per Tod; self-ID just "Gemini") | 2026-11-18 | `73bab0b` | `review/REVIEW-gemini-R1.pdf` (the `.md` is truncated mid-finding 2) | session 3 |
 | R2 | Claude Code, sysadmin-ansible workspace (WSL): Claude Opus 5.5 for Steps 0–1 (F1–F12), Claude Haiku 5.5 for Steps 2–3 (F13–F15) | 2026-11-18 | `e8802f9` ✓ | reply comment on Ansible/tower-projects#4 (note 22127) | session 3R |
+| R3 (#12, agentic) | Codex IDE extension (per Tod); self-ID "Codex, model unknown" | 2026-11-19 | `0140f2c` ✓ | `review/REVIEW-codex-R3-issue12.md` | 2026-11-19, fresh session |
 
 ## Steps
 
@@ -569,6 +570,9 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
   test override. ~~Drift check (note 22186): keep the host macro, send the CA's value to a text trapper,
   compare.~~ Built on 11-18, never released, replaced on the same branch. Design in ADR 0014's amendment.
   - [x] Pusher: per-apex value, never-matching placeholder + exit 1 when unusable; template; tests; docs.
+  - [x] Codex R3 review (3 findings, all real, all conditional; none wrong): value guard now refuses >200 chars,
+    `{`/`}` and non-printable/non-ASCII; tests pin `find()=0` polarity and the placeholder; docs no longer claim
+    daily `nodata()` proves LLD *applied* the discovery. On the live import, check the discovery rule's error too.
   - [ ] Live on 7.0: import, one daily push per host, read the discovered triggers back through the API
     (expression carries the CA's value; the rc2 problems stay closed). This is the first live test of an LLD
     macro inside a quoted `find()` parameter.

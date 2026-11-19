@@ -222,7 +222,9 @@ zabbix_export:
 
           This also covers the dns-persist apex discovery, which is sent by
           the same run: the pusher never withholds discovery while sending
-          expiry metrics, so stale discovery always shows up here first.
+          expiry metrics, so discovery that stopped arriving shows up here.
+          It doesn't show discovery Zabbix failed to apply: that error is
+          on the discovery rule itself.
           (A trigger cannot reference a discovery rule's key directly.)
         tags:
         - tag: env

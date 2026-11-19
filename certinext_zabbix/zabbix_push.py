@@ -414,10 +414,53 @@ class PersistExpected(NamedTuple):
     problems: dict[str, str]
 
 
-# A double quote or backslash would have to survive LLD substitution into a
-# quoted trigger-function parameter. Real dns-persist values never contain
-# either, so refusing them beats depending on Zabbix's escaping rules.
-_UNSAFE_PERSIST_CHARS = ('"', "\\")
+# LLD substitutes the value into a quoted find() parameter,
+# #3,"like","\"<value>\"", and Zabbix stores each function's parameters in
+# a 255-character column (functions.parameter). The wrapping adds 16, so
+# 239 is the hard ceiling; 200 leaves room for a wider #N window or another
+# argument. Real dns-persist values are 60-90 characters.
+PERSIST_VALUE_MAX_LEN = 200
+
+# '"' and '\' would have to survive LLD substitution into the quoted
+# parameter. '{' and '}' could let Zabbix read the value as a {$MACRO} and
+# expand it when the trigger is evaluated, so the check would match
+# something other than the CA's literal text. Real dns-persist values never
+# contain any of them, so refusing them beats depending on Zabbix's escaping
+# and macro rules.
+_UNSAFE_PERSIST_CHARS = frozenset('"\\{}')
+
+
+def persist_value_problem(value: str) -> str | None:
+    """Say why *value* can't be a trigger's literal expected value, if it can't.
+
+    The value lands inside a quoted ``find()`` parameter in every dns-persist
+    trigger, so it must fit Zabbix's parameter column and be read literally.
+    Only printable ASCII is accepted: how Zabbix stores and matches control
+    or non-ASCII characters there is untested, and real values have none.
+
+    Args:
+        value: A normalised DNS-PERSIST record value from the CA.
+
+    Returns:
+        ``None`` when the value is usable; otherwise a one-line reason for
+        the pusher log.
+    """
+    if not value:
+        return "CA returned no DNS-PERSIST record value"
+    if len(value) > PERSIST_VALUE_MAX_LEN:
+        return (
+            f"DNS-PERSIST value is {len(value)} characters, over the "
+            f"{PERSIST_VALUE_MAX_LEN}-character limit a trigger parameter can hold"
+        )
+    if not (value.isascii() and value.isprintable()):
+        return f"DNS-PERSIST value has a control or non-ASCII character: {value!r}"
+    unsafe = sorted(_UNSAFE_PERSIST_CHARS.intersection(value))
+    if unsafe:
+        return (
+            f"DNS-PERSIST value contains {''.join(unsafe)!r}, which a trigger "
+            f"parameter can't carry literally: {value!r}"
+        )
+    return None
 
 
 def persist_expected_by_apex(
@@ -431,8 +474,9 @@ def persist_expected_by_apex(
     own value, so nothing assumes the value is account-wide.
 
     Fail closed, per apex: when the CA gave no value, the apex's domain
-    records disagree, or the value holds a character a trigger string can't
-    carry safely, the apex still gets its row (so its checks are not
+    records disagree, or :func:`persist_value_problem` rejects the value
+    (too long, or a character a trigger parameter can't carry literally),
+    the apex still gets its row (so its checks are not
     deleted) but with :data:`PERSIST_VALUE_UNAVAILABLE`, which no TXT record
     matches, and the reason goes to *problems*.
 
@@ -456,12 +500,10 @@ def persist_expected_by_apex(
         candidates = seen[apex]
         value = next(iter(candidates)) if len(candidates) == 1 else ""
         if len(candidates) > 1:
-            problem = f"domain records disagree on the DNS-PERSIST value: {sorted(candidates)}"
-        elif not value:
-            problem = "CA returned no DNS-PERSIST record value"
-        elif any(c in value for c in _UNSAFE_PERSIST_CHARS):
-            problem = f"DNS-PERSIST value contains a double quote or backslash: {value!r}"
+            problem: str | None = f"domain records disagree on the DNS-PERSIST value: {sorted(candidates)}"
         else:
+            problem = persist_value_problem(value)
+        if problem is None:
             result.values[apex] = value
             continue
         result.values[apex] = PERSIST_VALUE_UNAVAILABLE

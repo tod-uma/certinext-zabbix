@@ -126,15 +126,24 @@ override.
   the CA's API, the record from DNS.
 - **Per apex, fail closed.** Each apex uses its own value; nothing assumes
   the value is account-wide. When the CA gives an apex no value, its
-  domain records disagree, or the value holds `"` or `\` (which would have
-  to survive LLD substitution into a quoted function parameter), the apex
-  still gets its row, so its checks aren't deleted, but with the
+  domain records disagree, or the value can't sit literally in the quoted
+  `find()` parameter, the apex still gets its row, so its checks aren't
+  deleted, but with the
   placeholder `NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG`.
   No record matches it, so the apex alerts as "record missing", and the
   trigger description names the placeholder. The pusher logs
   `No usable dns-persist value from the CA — apex will alert` per apex
   and exits 1. A method-read failure still withholds discovery entirely,
   as above.
+- **What "can't sit literally" means** (Codex R3 review, 2026-11-19):
+  over 200 characters (Zabbix keeps each function's parameters in a
+  255-character column, and the quoting adds 16); `"` or `\` (would have
+  to survive LLD escaping); `{` or `}` (Zabbix could read the value as a
+  `{$MACRO}` and expand it at evaluation, matching something other than
+  the CA's text); anything but printable ASCII (untested in Zabbix). Real
+  values are 60-90 printable ASCII characters with none of these, so the
+  guard costs nothing today; it exists so that an odd API answer alerts
+  instead of silently checking the wrong thing.
 - The value read never moves a domain to `failed`, so it can't hold back
   discovery or the expiry items. One pair of surrounding quotes is
   stripped; the API returns the value bare today.

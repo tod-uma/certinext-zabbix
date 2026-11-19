@@ -35,6 +35,7 @@ from certinext_zabbix.zabbix_push import (
     KEY_TOKEN_DOMAINS,
     KEY_TOTAL,
     KEY_UNVERIFIED,
+    PERSIST_VALUE_MAX_LEN,
     PERSIST_VALUE_UNAVAILABLE,
     DomainScope,
     OrderBuckets,
@@ -49,6 +50,7 @@ from certinext_zabbix.zabbix_push import (
     persist_discovery_value,
     persist_expected_by_apex,
     persist_record_value,
+    persist_value_problem,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -389,13 +391,34 @@ class TestPersistExpectedByApex:
         )
         assert result == ({"a.edu": _PERSIST_VALUE}, {})
 
-    @pytest.mark.parametrize("bad", ['ssl.com; x="y"', "ssl.com; x=\\y"])
-    def test_quote_or_backslash_is_refused(self, bad: str) -> None:
-        # Either would have to survive LLD substitution into a quoted
-        # trigger-function parameter.
+    @pytest.mark.parametrize("bad", [
+        'ssl.com; x="y"',  # would have to survive LLD into a quoted parameter
+        "ssl.com; x=\\y",
+        "ssl.com; x={$CERTINEXT.ENV}",  # Zabbix could expand it (Codex R3 finding 2)
+        "ssl.com; x={#APEX}",
+        "ssl.com; x=}",
+        "ssl.com; x=1\nssl.com",  # control/non-ASCII: storage untested
+        "ssl.com; x=\x00",
+        "ssl.com; x=café",
+        "x" * (PERSIST_VALUE_MAX_LEN + 1),  # overflows functions.parameter (Codex R3 finding 1)
+    ])
+    def test_unusable_value_is_refused(self, bad: str) -> None:
         result = persist_expected_by_apex([_domain("a.edu")], [bad])
         assert result.values == {"a.edu": PERSIST_VALUE_UNAVAILABLE}
         assert "a.edu" in result.problems
+
+    def test_value_at_length_limit_is_accepted(self) -> None:
+        value = "x" * PERSIST_VALUE_MAX_LEN
+        assert persist_expected_by_apex([_domain("a.edu")], [value]) == ({"a.edu": value}, {})
+
+    def test_length_limit_fits_zabbix_parameter_column(self) -> None:
+        # The longest parameter the template builds from the value must fit
+        # Zabbix's 255-character functions.parameter column.
+        assert len(f'#3,"like","\\"{"x" * PERSIST_VALUE_MAX_LEN}\\""') <= 255
+
+    def test_real_values_are_usable(self) -> None:
+        assert persist_value_problem(_PERSIST_VALUE) is None
+        assert persist_value_problem(self._OTHER) is None
 
     def test_nameless_record_is_dropped_like_discovery(self) -> None:
         result = persist_expected_by_apex([_domain(None), _domain("a.edu")], ["", _PERSIST_VALUE])  # type: ignore[arg-type]
@@ -407,9 +430,21 @@ class TestPersistExpectedByApex:
         result = persist_expected_by_apex(persist, [_PERSIST_VALUE, "", self._OTHER])
         assert sorted(result.values) == persist_apex_names(persist)
 
+    def test_placeholder_is_pinned(self) -> None:
+        # Docs and trigger descriptions quote it verbatim; a change must be
+        # deliberate (Codex R3 finding 3: a weaker sentinel passed before).
+        assert PERSIST_VALUE_UNAVAILABLE == "NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG"
+
+    def test_placeholder_passes_its_own_guard(self) -> None:
+        # It goes into the same trigger parameter as a real value.
+        assert persist_value_problem(PERSIST_VALUE_UNAVAILABLE) is None
+
     def test_placeholder_cannot_match_a_real_record(self) -> None:
-        assert '"' not in PERSIST_VALUE_UNAVAILABLE
-        assert PERSIST_VALUE_UNAVAILABLE not in _PERSIST_VALUE
+        # The trigger looks for it quoted, so a real record would have to
+        # contain the whole quoted placeholder.
+        for real in (_PERSIST_VALUE, self._OTHER):
+            assert f'"{PERSIST_VALUE_UNAVAILABLE}"' not in f'"{real}"'
+            assert PERSIST_VALUE_UNAVAILABLE not in real
 
     def test_length_mismatch_is_a_bug_not_a_silent_pass(self) -> None:
         with pytest.raises(ValueError):
