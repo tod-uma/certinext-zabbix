@@ -785,6 +785,9 @@ zabbix_export:
           width: '12'
           height: '3'
           fields:
+          - type: INTEGER
+            name: decimal_places
+            value: '0'
           - type: ITEM
             name: itemid.0
             value:
@@ -796,6 +799,9 @@ zabbix_export:
           width: '12'
           height: '3'
           fields:
+          - type: INTEGER
+            name: decimal_places
+            value: '0'
           - type: ITEM
             name: itemid.0
             value:
@@ -813,6 +819,9 @@ zabbix_export:
           width: '12'
           height: '3'
           fields:
+          - type: INTEGER
+            name: decimal_places
+            value: '0'
           - type: ITEM
             name: itemid.0
             value:
@@ -835,6 +844,9 @@ zabbix_export:
           width: '12'
           height: '3'
           fields:
+          - type: INTEGER
+            name: decimal_places
+            value: '0'
           - type: ITEM
             name: itemid.0
             value:

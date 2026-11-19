@@ -454,6 +454,24 @@ class TestDashboard:
             colors = [n for n in names if re.fullmatch(r"ds\.0\.color\.\d+", n)]
             assert len(items) == len(colors), w["name"]
 
+    def test_value_decimals_match_item_type(self, template: dict[str, Any]) -> None:
+        """Whole-number items show 0 decimals; float items keep the default.
+
+        The Item value widget defaults to 2 decimals, which rendered counts
+        as "21.00" on the first live import (2026-11-19).
+        """
+        float_keys = {i["key"] for i in template["items"] if i.get("value_type") == "FLOAT"}
+        for w in _widgets(template):
+            if w["type"] != "item":
+                continue
+            fields = {f["name"]: f for f in w["fields"]}
+            key = fields["itemid.0"]["value"]["key"]
+            decimals = fields.get("decimal_places", {}).get("value")
+            if key in float_keys:
+                assert decimals is None, f"{w['name']!r}: float item, keep the default decimals"
+            else:
+                assert decimals == "0", f"{w['name']!r}: count item needs decimal_places 0"
+
     def test_fields_in_canonical_order(self, template: dict[str, Any]) -> None:
         """Fields are sorted by name, as Zabbix exports them.
 
