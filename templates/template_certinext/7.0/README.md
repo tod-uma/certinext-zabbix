@@ -22,6 +22,13 @@ Why one host per environment:
 Why dns-persist is checked in DNS rather than by its `validTill`:
 [ADR 0014](../../../docs/adr/0014-dns-persist-checked-by-zabbix-agent.md).
 
+Only dns-persist records are checked in DNS. Domains validated by a
+one-time token (a DNS TXT record per validation, the method most CAs used
+before dns-persist) get the days-left alerts on their `validTill`, but
+nothing looks up their TXT record. If you need that, open an issue at
+[github.com/tod-uma/certinext-zabbix/issues](https://github.com/tod-uma/certinext-zabbix/issues)
+and it can be added.
+
 Upgrading from 0.1.x (`[prod]`/`[sandbox]` keys)? Every item key changed;
 follow the upgrade section of the root repo's
 [docs/deployment.md](../../../docs/deployment.md#upgrading-from-01x).
@@ -238,6 +245,24 @@ threshold separates healthy mid-life certificates from lapsed ones. See
 [ADR 0008](../../../docs/adr/0008-orders-expiring-ships-data-only.md); a
 trigger becomes possible once the metric is segmented by originator
 ([IDEA-005](../../../docs/wishlist/IDEA-005-originator-alert-severity-bucketing.md)).
+
+## Dashboard
+
+The template ships one dashboard, **CertiNext overview**. Zabbix shows a
+template dashboard on each linked host, filled with that host's data, so
+each environment gets its own: open the host (*Monitoring → Hosts*, then
+*Dashboards*). A sandbox host shows one only because it has the template;
+nothing else to set up.
+
+| Row | Widgets |
+| --- | --- |
+| Top | Latest values: domains total, unverified domains (yellow at 1 or more), dns-persist apexes, token-method DCV minimum days left, orders awaiting issuance, days since the last certificate was issued |
+| Middle | Problems by severity, and this host's current problems |
+| Bottom | Graphs: domains (total, unverified), DCV days left (token-method, dns-persist), orders (awaiting issuance, awaiting download, failed recently, issued certificates expiring soon) |
+
+A template dashboard can't show two hosts at once. For a single view of
+every environment, build a global dashboard filtered on the host group
+your CertiNext hosts are in; a disabled host drops out of it on its own.
 
 ## Author
 

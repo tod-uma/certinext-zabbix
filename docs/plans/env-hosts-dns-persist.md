@@ -65,7 +65,8 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 r
   - [x] outgoing artifacts swept (gitleaks clean on the scope and on the bundle; the only grep hits are the internal
     GitLab URL, already on the public mirror); Tod chose **both** reviewers (Codex + a paste-only one).
     Table rows filled at hand-off; the paste-only service and both products' self-IDs are confirmed in session 3
-- [ ] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag)
+- [x] **Session 3 — docs + ship** (steps 4, 5 repo side: ADRs 0013/0014, docs, MR, 0.2.0 pre-release tag).
+  Shipping moved to session 3R once Tod kept R2; `v0.2.0rc1` was tagged there.
   - [x] starts by processing R1's findings (fresh session; re-derive each against source), 2026-11-18. Both
     findings files name `73bab0b`. Re-derived against the [7.0 item object API][item-api] (preprocessing type
     26, `error_handler_params`), the [7.0 template export schema][export-schema], the plan's recorded agent2
@@ -106,8 +107,7 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 r
     the R2 reviewer** (see *R2* below): brief posted as a comment on Ansible/tower-projects#4 (local copy
     `review/REVIEW-BRIEF-ansible-R2.md`), pinned at `e8802f9` (pipeline for `2380008` green; `e8802f9` adds only
     the IDEA-007 issue link). Findings come back as a reply on #4; Tod then prompts session 3R here.
-- [ ] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag). Skipped, with session 3
-  doing the shipping, if Tod drops R2.
+- [x] **Session 3R — process R2 findings, then ship** (MR, merge, 0.2.0 pre-release tag): `v0.2.0rc1`.
   - [x] R2 triaged and fixed, 2026-11-18. 15 findings plus 8 local-knowledge entries; every finding was checked against
     source. F2's sub-claim was confirmed: all 9 `[prod]` item UUIDs and 12/16 trigger UUIDs match v0.1.0rc11's. So was
     F3's: 4 triggers are new, among them days-since-issued. F10's help text was confirmed against certinext's
@@ -141,6 +141,10 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 r
   `CertiNext sandbox` created, the role run, all 6 units run (prod 21 apexes / 63 DNS items, sandbox 20 / 60).
   Hosts in maintenance (data collection on). Still to do: step 13 (Unlink and clear the old host), Verification
   4's "no persist triggers firing", Verification 5, step 17.
+  - Update 2026-11-19: step 13 done (rc2, note 22186). **`0.2.0rc3` deployed** (tower-projects !933,
+    `4d6c5ea8`); all 82 persist triggers OK after its first push (Verification 4's "none firing" holds).
+    Verification 5 test 1 is now a TXT edit, since there is no macro knob (see #12 below); tests 2–3 and step 17
+    are still open. Hosts still in maintenance.
 - [x] **Session 4R — rc2 trigger fix** (branch `fix/dns-persist-trigger-macro-context`, `0.2.0rc2`)
   - [x] Bug: every apex raised "record missing" and "not visible publicly" within about 1 s of its first
     lookup. Cause, live on 7.0: an unquoted macro context ends at the first `}`, so
@@ -573,12 +577,16 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
   - [x] Codex R3 review (3 findings, all real, all conditional; none wrong): value guard now refuses >200 chars,
     `{`/`}` and non-printable/non-ASCII; tests pin `find()=0` polarity and the placeholder; docs no longer claim
     daily `nodata()` proves LLD *applied* the discovery. On the live import, check the discovery rule's error too.
-  - [ ] Live on 7.0: import, one daily push per host, read the discovered triggers back through the API
-    (expression carries the CA's value; the rc2 problems stay closed). This is the first live test of an LLD
-    macro inside a quoted `find()` parameter.
-  - [ ] Delete the now-unused `{$CERTINEXT.PERSIST.EXPECTED}` host macros on both hosts.
-  - [ ] Negative test without the macro knob: e.g. temporarily edit a sandbox apex's TXT, expect HIGH in
-    ~15 min, restore.
+  - [x] Shipped as `v0.2.0rc3` (MR !23, `5f5ab99`), tagged before the live test at Tod's call so the deploy
+    could pin a released package.
+  - [x] Live on 7.0, 2026-11-19: template imported, rc3 deployed, one expiry push per host. Read back through
+    the API from the raw `functions.parameter` (`expandExpression` substitutes the old host macro too, so it
+    can't tell rc2 from rc3): all 82 discovered persist triggers carry the CA's literal value, each host its own
+    account's; both discovery rules error-free; all 82 OK. **An LLD macro inside a quoted `find()` parameter is
+    substituted on 7.0.**
+  - [x] `{$CERTINEXT.PERSIST.EXPECTED}` host macros deleted on both hosts (Tod; API-confirmed). #12 closed.
+  - [ ] Negative test without the macro knob: temporarily edit a sandbox apex's TXT, expect HIGH in ~15 min
+    there and nothing on prod, restore. Running as part of session 4 (sandbox uma.edu); result pending.
 - One prod apex carries a persist value for a second CA: ask who authorised it.
 
 ## References

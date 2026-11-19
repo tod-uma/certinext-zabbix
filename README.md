@@ -6,7 +6,9 @@ pushes; the template also has the Zabbix agent check each dns-persist
 domain's `_validation-persist` TXT record in DNS. For any InCommon /
 higher-ed operator using [CertiNext](https://www.entrust.com/products/certinext)
 who wants Domain Control Validation (DCV) expiry and verification-state
-visibility in Zabbix.
+visibility in Zabbix. Only dns-persist records are checked in DNS; if you
+need DNS checks for token-method (one-time TXT record) DCV too, open an
+issue at [GitHub](https://github.com/tod-uma/certinext-zabbix/issues).
 
 ## AI-agent quickstart
 
