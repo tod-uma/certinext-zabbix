@@ -151,11 +151,23 @@ risk here, items deleted after a partial list, is handled by the
   any persist `find()` without its `count()` gate.
 - Confirmed live (session 4, 0.2.0rc1): the import, the preprocessing
   export constants, and item and trigger counts after the first runs.
-- Still to run, live (0.2.0rc2): that the expected value now matches
-  (no "record missing" on any apex after a full window), and the
-  negative tests: a wrong host-level `EXPECTED` on a host in
-  maintenance raises HIGH on every apex after about 15 minutes; a dead
-  `RESOLVER.1` raises "lookup failing" and not "record missing".
+- Confirmed live (2026-11-18, 0.2.0rc2; Ansible/tower-projects#4 note
+  22186): all 82 rc1 false problems (41 "record missing", 41 "not visible
+  publicly") closed, and none returned. Negative test: a wrong host-level
+  `EXPECTED` on the sandbox host raised HIGH and AVERAGE on all 20
+  apexes **within about a minute**, and restoring it closed all 40.
+- The timing depends on the cause. A changed `EXPECTED` re-evaluates the
+  values already stored, so every value in the window misses at once
+  and the trigger fires on the next lookup. A record that really
+  disappears still has older matching values in the window, so it
+  alerts only after 3 consecutive misses, about 15 minutes. The
+  `count()` gate holds back only newly discovered apexes. It is not
+  what debounces a real miss.
+- Still to run, live: the misroute test, and a dead `RESOLVER.1` that
+  raises "lookup failing" and not "record missing".
+- Follow-up: certinext-zabbix#12 alerts when the configured `EXPECTED`
+  drifts from the CA's value, so a wrong macro is caught at
+  configuration time, not as HIGH on every apex.
 
 ## Pros and cons of the options
 

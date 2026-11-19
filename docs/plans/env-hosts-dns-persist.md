@@ -141,7 +141,7 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 r
   `CertiNext sandbox` created, the role run, all 6 units run (prod 21 apexes / 63 DNS items, sandbox 20 / 60).
   Hosts in maintenance (data collection on). Still to do: step 13 (Unlink and clear the old host), Verification
   4's "no persist triggers firing", Verification 5, step 17.
-- [ ] **Session 4R — rc2 trigger fix** (branch `fix/dns-persist-trigger-macro-context`, `0.2.0rc2`)
+- [x] **Session 4R — rc2 trigger fix** (branch `fix/dns-persist-trigger-macro-context`, `0.2.0rc2`)
   - [x] Bug: every apex raised "record missing" and "not visible publicly" within about 1 s of its first
     lookup. Cause, live on 7.0: an unquoted macro context ends at the first `}`, so
     `{$CERTINEXT.PERSIST.EXPECTED:{#APEX}}` parsed as context `{#APEX` plus a literal `}`. LLD left it
@@ -157,14 +157,19 @@ only live copy. Branch: `feat/env-hosts-dns-persist`. Version: `0.2.0rc2` (rc1 r
     hand on both envs, so LLD rewrote the discovered triggers): expanded expression ends in the full quoted
     value (no stray `}`); on the next local lookup (21:49Z) **all 41 "record missing" closed**; "lookup
     failing" 0. "Not visible publicly" (41) still open then: hourly lookups, so it re-evaluates about an
-    hour after discovery. Confirm it closes before tagging.
-  - [ ] MR, merge, tag `v0.2.0rc2`; then session 4 resumes: re-import, check that no persist trigger fires
-    after a full window, then Verification 5.
+    hour after discovery. ~~Confirm it closes before tagging.~~ All 41 closed after *Execute now* (22:09Z).
+  - [x] MR !21 merged (`af9b48b`), tag `v0.2.0rc2` released. Session 4 resumed (sysadmin-ansible,
+    tower-projects#4 note 22186): template on the server == the tag, no re-import needed; all 82 rc1 problems
+    stayed closed; tower-projects !932 pins `0.2.0rc2`; step 13 (Unlink and clear) done; Verification 5 test 1
+    passed, tests 2–3 not run.
+  - F20 (note 22186): the negative test fired in ~1 min, not ~15. Partly right: a changed macro fails the whole
+    stored window at once, but a real disappearance still needs 3 misses. Wording fixed in ADR 0014 and
+    Verification 5; no template change.
   - F19 (venv path): no doc change. The docs' `/opt/certinext-zabbix` is the generic install example; the
     UMS role's `/opt/certinext` is UMS-specific.
   - F17 proper (the pusher sends `{#PERSIST.EXPECTED}` from the CA's API): **not in rc2**. It needs an
     unverified live check (whether a bare LLD macro inside a quoted `find()` parameter is substituted) and a
-    pusher change; tracked as a follow-up.
+    pusher change. **Redesigned as a drift check: certinext-zabbix#12** (see Follow-ups).
 
   <details>
   <summary>Why drop the context rather than quote it or adopt F17 now</summary>
@@ -254,7 +259,8 @@ wrote the brief has already formed opinions about what the reviewer should have 
      unsupported.
    - **Trigger prototypes** ([`find`][fn-string], [`nodata`][fn-history]):
      - Record missing, local resolver, HIGH: `find(…,#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0`.
-       Matches the exact quoted value; `#3` ≈ 15 min debounce.
+       Matches the exact quoted value; `#3` ≈ 15 min debounce for a real disappearance (a changed macro fires
+       on the next lookup, because it re-evaluates the stored values).
      - Not visible from an external resolver, AVERAGE: `#2`, depends on the local trigger.
      - Lookup failing (resolver down), AVERAGE: `nodata(…,{$CERTINEXT.DNS.NODATA})`.
    - **Discovery rule:** trapper, `allowed_hosts {$CERTINEXT.SENDER.ALLOWED}`; lost resources deleted after
@@ -522,8 +528,11 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
    - no persist or misroute triggers are firing
    - the old days-left WARNINGs are gone
 5. **Negative tests (Tod's call; live alerts):**
-   - a wrong host-level `{$CERTINEXT.PERSIST.EXPECTED}` on the sandbox host (in maintenance) → HIGH on every
-     apex after about 15 min (3 lookups; the `count()` gate) → revert (rc2; no per-apex override exists)
+   - [x] a wrong host-level `{$CERTINEXT.PERSIST.EXPECTED}` on the sandbox host (in maintenance) → HIGH on every
+     apex on the **next lookup** (a changed macro re-evaluates the stored values, so the whole window misses at
+     once; only a real disappearance waits for 3 misses) → revert (rc2; no per-apex override exists).
+     **Passed 2026-11-18** (tower-projects#4 note 22186): 20/20 HIGH + 20/20 AVERAGE within ~1 min; prod 0;
+     restored + *Execute now* → all 40 closed in ~2 min
    - send one sandbox run to the prod host (`--zabbix-host`) → misroute HIGH → revert
    - point `{$CERTINEXT.DNS.RESOLVER.1}` at 192.0.2.1 on the sandbox host → "lookup failing" fires, "record
      missing" does not → revert
@@ -554,10 +563,10 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
 - 2026-11-20 ~13:41Z: watch the prod org apex after its `validTill` lapses. If `dcvStatus` leaves VERIFIED, the
   `unverified` metric needs method-awareness too, and the INFO trigger shows whether revalidation is lazy.
 - `orders.failed_recent` (prod) = 1 as of 2026-11-18: look at it separately.
-- F17 (tower-projects#4 note 22174): the daily `--expiry-days` run reads the DNS-PERSIST option's record value
-  from the CA's API and sends it as `{#PERSIST.EXPECTED}` in each discovery row. Fail closed if unreadable;
-  keep a manual override; amend ADR 0014. First prove live that a bare LLD macro inside a quoted `find()`
-  parameter is substituted on 7.0.
+- F17 → **certinext-zabbix#12, before 0.2.0 stable.** ~~Original design (note 22174): send `{#PERSIST.EXPECTED}`
+  in each discovery row and match on it.~~ Replaced (note 22186) by a drift check: keep the proven host-macro
+  matcher; the daily run sends the CA's value to a text trapper; one trigger compares it to the macro.
+  Gated on a live test of a user macro inside a string constant on 7.0.
 - One prod apex carries a persist value for a second CA: ask who authorised it.
 
 ## References
