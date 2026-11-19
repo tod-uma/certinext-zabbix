@@ -22,6 +22,13 @@ Why one host per environment:
 Why dns-persist is checked in DNS rather than by its `validTill`:
 [ADR 0014](../../../docs/adr/0014-dns-persist-checked-by-zabbix-agent.md).
 
+Only dns-persist records are checked in DNS. Domains validated by a
+one-time token (a DNS TXT record per validation, the method most CAs used
+before dns-persist) get the days-left alerts on their `validTill`, but
+nothing looks up their TXT record. If you need that, open an issue at
+[github.com/tod-uma/certinext-zabbix/issues](https://github.com/tod-uma/certinext-zabbix/issues)
+and it can be added.
+
 Upgrading from 0.1.x (`[prod]`/`[sandbox]` keys)? Every item key changed;
 follow the upgrade section of the root repo's
 [docs/deployment.md](../../../docs/deployment.md#upgrading-from-01x).
