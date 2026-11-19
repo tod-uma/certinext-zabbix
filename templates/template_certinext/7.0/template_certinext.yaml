@@ -62,8 +62,9 @@ zabbix_export:
       gated on token_domains > 0. DNS-PERSIST domains are re-checked by the
       CA at each issuance, so their validTill is only a reuse clock: it
       raises an INFORMATION event when it lapses, and the real dependency,
-      the TXT record in public DNS, is checked by the agent against
-      {$CERTINEXT.PERSIST.EXPECTED}.
+      the TXT record in public DNS, is checked by the agent against the
+      value the CA's API says to publish, which the pusher sends with each
+      discovered apex.
 
       Order-health alerts on orders stuck awaiting issuance past
       {$CERTINEXT.ORDER.STUCK_AGE}, certificates generated but left
@@ -221,7 +222,9 @@ zabbix_export:
 
           This also covers the dns-persist apex discovery, which is sent by
           the same run: the pusher never withholds discovery while sending
-          expiry metrics, so stale discovery always shows up here first.
+          expiry metrics, so discovery that stopped arriving shows up here.
+          It doesn't show discovery Zabbix failed to apply: that error is
+          on the discovery rule itself.
           (A trigger cannot reference a discovery rule's key directly.)
         tags:
         - tag: env
@@ -564,10 +567,16 @@ zabbix_export:
       enabled_lifetime_type: DISABLE_NEVER
       description: |
         Apexes whose DCV method is DNS-PERSIST, sent by the daily
-        --expiry-days pusher run as [{"{#APEX}": "example.edu"}, ...]. For
-        each apex the agent looks up _validation-persist.{#APEX} TXT on the
-        local resolver and on two public resolvers, and checks that the
-        expected value ({$CERTINEXT.PERSIST.EXPECTED}) is published.
+        --expiry-days pusher run as
+        [{"{#APEX}": "example.edu", "{#PERSIST.EXPECTED}": "ssl.com; ..."}, ...].
+        {#PERSIST.EXPECTED} is the record value the CA's API says to
+        publish for that apex, unquoted; nobody sets it in Zabbix. For each
+        apex the agent looks up _validation-persist.{#APEX} TXT on the
+        local resolver and on two public resolvers, and the triggers check
+        that the value is published. If the CA gives no usable value for an
+        apex, the pusher sends a placeholder that no record matches, so
+        that apex alerts as "record missing" (fail closed) and the pusher
+        logs why and exits 1.
 
         The pusher only sends a complete list: if any domain's DCV method
         could not be read it withholds the list for that run, because an
@@ -604,18 +613,23 @@ zabbix_export:
           value: '{$CERTINEXT.ENV}'
         trigger_prototypes:
         - uuid: 60c21b5d5d2f4d6d82a5a70b587e7255
-          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0'
+          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{#PERSIST.EXPECTED}\"")=0'
           name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record missing for {#APEX}'
           opdata: 'TXT: {ITEM.LASTVALUE1}'
           priority: HIGH
           description: |
             None of the last 3 lookups (about 15 minutes) of
             _validation-persist.{#APEX} TXT on the local resolver contained
-            the expected value {$CERTINEXT.PERSIST.EXPECTED}. The CA
-            checks this record at every validation and issuance, so
+            the value the CA's API says to publish: {#PERSIST.EXPECTED}. The
+            CA checks this record at every validation and issuance, so
             certificate orders for {#APEX} and its subdomains will fail DCV
             until it is restored. Republish the record with your DCV
-            automation, then check it with dig.
+            automation, then check it with dig. If the CA changed the value
+            (e.g. a new account URI), every apex fires at once after the
+            daily run; publish the new value. If the expected value above is
+            NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG, DNS may
+            be fine: the CA's API gave no usable value for this apex, and
+            the pusher log says why.
           tags:
           - tag: env
             value: '{$CERTINEXT.ENV}'
@@ -670,7 +684,7 @@ zabbix_export:
           value: '{$CERTINEXT.ENV}'
       trigger_prototypes:
       - uuid: da77e35dc0344aa489cb0c6d346afd54
-        expression: '(count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0) or (count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0)'
+        expression: '(count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT],#2,"like","\"{#PERSIST.EXPECTED}\"")=0) or (count(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2)>=2 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT],#2,"like","\"{#PERSIST.EXPECTED}\"")=0)'
         name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record for {#APEX} not visible publicly'
         opdata: '{$CERTINEXT.DNS.RESOLVER.1}: {ITEM.LASTVALUE1}; {$CERTINEXT.DNS.RESOLVER.2}: {ITEM.LASTVALUE2}'
         priority: AVERAGE
@@ -683,7 +697,7 @@ zabbix_export:
           resolvers aren't serving a stale negative answer.
         dependencies:
         - name: 'CertiNext {$CERTINEXT.ENV}: dns-persist record missing for {#APEX}'
-          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{$CERTINEXT.PERSIST.EXPECTED}\"")=0'
+          expression: 'count(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3)>=3 and find(/CertiNext DCV by Zabbix trapper/net.dns.record[,_validation-persist.{#APEX},TXT],#3,"like","\"{#PERSIST.EXPECTED}\"")=0'
         tags:
         - tag: env
           value: '{$CERTINEXT.ENV}'
@@ -755,9 +769,6 @@ zabbix_export:
     - macro: '{$CERTINEXT.ORDER.UNDOWNLOADED_AGE}'
       value: 7d
       description: 'How long a generated certificate may sit undownloaded before its trigger fires. Longer than STUCK_AGE: a manual portal order can legitimately wait for someone to collect it, whereas an ACME order should download within seconds'
-    - macro: '{$CERTINEXT.PERSIST.EXPECTED}'
-      value: CONFIGURE-ME
-      description: 'SET ON EACH HOST: the exact value of your _validation-persist TXT record, without the surrounding quotes: the full string (e.g. ssl.com; accounturi=https://...), not just the CA or API hostname. One value per host; there is no per-apex override (Zabbix does not substitute an LLD macro in an unquoted macro context). The default matches nothing, so every discovered apex alerts until it is set — fail closed.'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'

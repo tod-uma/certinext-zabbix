@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 from certinext.exceptions import CertiNextAPIError
-from certinext.models.domains import Domain
+from certinext.models.domains import DcvInfo, Domain
 from certinext.orders import OrderRecord
 from zabbix_utils.exceptions import ProcessingError
 
@@ -35,6 +35,8 @@ from certinext_zabbix.zabbix_push import (
     KEY_TOKEN_DOMAINS,
     KEY_TOTAL,
     KEY_UNVERIFIED,
+    PERSIST_VALUE_MAX_LEN,
+    PERSIST_VALUE_UNAVAILABLE,
     DomainScope,
     OrderBuckets,
     bucket_orders,
@@ -43,8 +45,12 @@ from certinext_zabbix.zabbix_push import (
     collect_order_metrics,
     fetch_dcv_methods,
     fetch_orders,
+    normalise_persist_value,
     persist_apex_names,
     persist_discovery_value,
+    persist_expected_by_apex,
+    persist_record_value,
+    persist_value_problem,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -104,6 +110,10 @@ class TestBareKeys:
         assert KEY_TOKEN_DOMAINS == "certinext.dcv.token_domains"
         assert KEY_PERSIST_MIN_DAYS_LEFT == "certinext.dcv.persist_min_days_left"
         assert KEY_PERSIST_APEXES == "certinext.dcv.persist_apexes"
+
+    def test_no_persist_expected_key(self) -> None:
+        # Removed in #12's redesign: the value rides in the discovery rows.
+        assert not hasattr(zabbix_push, "KEY_PERSIST_EXPECTED")
 
 
 class TestCollectDomainMetrics:
@@ -204,19 +214,51 @@ class TestCollectExpiryMetrics:
         }
 
 
-def _method_domain(name: str, method: str = "DNS-TXT") -> MagicMock:
+# Placeholder only: the real per-account value must never land in this
+# repo (it mirrors publicly — certinext-zabbix#12).
+_PERSIST_VALUE = "ca.example; accounturi=https://ca.example.invalid/acct/PLACEHOLDER"
+
+
+def _dcv_info(method: str, persist_value: str | None = _PERSIST_VALUE) -> DcvInfo:
+    """Build a real ``DcvInfo`` like an SSL.com ``get_dcv()`` response.
+
+    Args:
+        method: Upper-case DCV method (the selected option).
+        persist_value: ``recordValue`` of the offered DNS-PERSIST option, or
+            None to offer no persist option at all.
+
+    Returns:
+        The parsed DcvInfo.
+    """
+    options: list[dict[str, Any]] = [
+        {"optionId": "txt", "method": "dns-txt", "recordValue": "token123"},
+    ]
+    if persist_value is not None:
+        options.append({"optionId": "persist", "method": "dns-persist", "recordValue": persist_value})
+    selected = next((o for o in options if o["method"].upper() == method), options[0])
+    return DcvInfo.from_wire({
+        "method": method, "validatedBy": "SSLCOM", "optionId": selected["optionId"],
+        "recordValue": selected["recordValue"], "options": options,
+    })
+
+
+def _method_domain(
+    name: str, method: str = "DNS-TXT", persist_value: str | None = _PERSIST_VALUE,
+) -> MagicMock:
     """Build a mock domain whose ``get_dcv()`` reports *method*.
 
     Args:
         name: Domain name.
         method: Upper-case DCV method returned as ``DcvInfo.method``.
+        persist_value: The DNS-PERSIST option's record value, or None for
+            no persist option.
 
     Returns:
-        A MagicMock with ``name`` and a ``get_dcv`` returning *method*.
+        A MagicMock with ``name`` and a ``get_dcv`` returning a DcvInfo.
     """
     domain = MagicMock()
     domain.name = name
-    domain.get_dcv.return_value = SimpleNamespace(method=method)
+    domain.get_dcv.return_value = _dcv_info(method, persist_value)
     return domain
 
 
@@ -236,7 +278,7 @@ class TestFetchDcvMethods:
     def test_retries_transient_failure_then_succeeds(self) -> None:
         flaky = _method_domain("flaky.edu", DCV_METHOD_PERSIST)
         flaky.get_dcv.side_effect = [
-            httpx.ReadTimeout("timed out"), SimpleNamespace(method=DCV_METHOD_PERSIST),
+            httpx.ReadTimeout("timed out"), _dcv_info(DCV_METHOD_PERSIST),
         ]
         with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
             split = fetch_dcv_methods([flaky], retry_delay=5.0)
@@ -263,26 +305,173 @@ class TestFetchDcvMethods:
         assert weird.get_dcv.call_count == 1
         mock_sleep.assert_not_called()
 
+    def test_persist_values_parallel_to_persist(self) -> None:
+        a = _method_domain("a.edu", DCV_METHOD_PERSIST)
+        txt = _method_domain("txt.edu", "DNS-TXT")
+        b = _method_domain("b.edu", DCV_METHOD_PERSIST, persist_value=None)
+        split = fetch_dcv_methods([a, txt, b])
+        assert split.persist == [a, b]
+        assert split.persist_values == [_PERSIST_VALUE, ""]
+
+    def test_missing_persist_value_is_not_a_failed_domain(self) -> None:
+        # The value read must never withhold discovery (#12).
+        d = _method_domain("p.edu", DCV_METHOD_PERSIST)
+        d.get_dcv.return_value = SimpleNamespace(method=DCV_METHOD_PERSIST)
+        split = fetch_dcv_methods([d])
+        assert split.persist == [d]
+        assert split.failed == []
+        assert split.persist_values == [""]
+
+
+class TestPersistRecordValue:
+    """Reading and normalising the DNS-PERSIST option's record value."""
+
+    def test_prefers_the_persist_option(self) -> None:
+        assert persist_record_value(_dcv_info(DCV_METHOD_PERSIST)) == _PERSIST_VALUE
+
+    def test_falls_back_to_selected_record_value(self) -> None:
+        info = DcvInfo.from_wire({
+            "method": "dns-persist", "validatedBy": "SSLCOM", "recordValue": _PERSIST_VALUE,
+        })
+        assert persist_record_value(info) == _PERSIST_VALUE
+
+    def test_options_without_persist_entry_fail_closed(self) -> None:
+        # The top-level value then belongs to some other option (a token);
+        # sending it would fail open.
+        info = _dcv_info(DCV_METHOD_PERSIST, persist_value=None)
+        assert info.record_value == "token123"
+        assert persist_record_value(info) == ""
+
+    @pytest.mark.parametrize("raw", [
+        _PERSIST_VALUE, f'"{_PERSIST_VALUE}"', f"  {_PERSIST_VALUE}\n", f'  " {_PERSIST_VALUE} " ',
+    ])
+    def test_normalises_to_unquoted_form(self, raw: str) -> None:
+        # {#PERSIST.EXPECTED} holds the value without quotes; the template adds them.
+        assert normalise_persist_value(raw) == _PERSIST_VALUE
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", '""'])
+    def test_blank_is_empty(self, raw: str | None) -> None:
+        assert normalise_persist_value(raw) == ""
+
+    def test_lone_quote_kept(self) -> None:
+        assert normalise_persist_value('"') == '"'
+
+
+class TestPersistExpectedByApex:
+    """Each apex gets the CA's value, or a never-matching placeholder (certinext-zabbix#12)."""
+
+    _OTHER = "other.example; accounturi=https://other.example.invalid/acct/2"
+
+    def test_each_apex_gets_its_own_value(self) -> None:
+        # No account-wide assumption: different apexes may differ.
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, self._OTHER],
+        )
+        assert result.values == {"a.edu": _PERSIST_VALUE, "b.edu": self._OTHER}
+        assert result.problems == {}
+
+    def test_no_persist_domains_is_empty_not_an_error(self) -> None:
+        assert persist_expected_by_apex([], []) == ({}, {})
+
+    def test_missing_value_gets_placeholder_and_problem(self) -> None:
+        result = persist_expected_by_apex([_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, ""])
+        assert result.values == {"a.edu": _PERSIST_VALUE, "b.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert set(result.problems) == {"b.edu"}
+
+    def test_records_disagreeing_for_one_apex_fail_closed(self) -> None:
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("a.edu")], [_PERSIST_VALUE, self._OTHER],
+        )
+        assert result.values == {"a.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert "disagree" in result.problems["a.edu"]
+
+    def test_duplicate_records_that_agree_are_fine(self) -> None:
+        result = persist_expected_by_apex(
+            [_domain("a.edu"), _domain("a.edu")], [_PERSIST_VALUE, _PERSIST_VALUE],
+        )
+        assert result == ({"a.edu": _PERSIST_VALUE}, {})
+
+    @pytest.mark.parametrize("bad", [
+        'ssl.com; x="y"',  # would have to survive LLD into a quoted parameter
+        "ssl.com; x=\\y",
+        "ssl.com; x={$CERTINEXT.ENV}",  # Zabbix could expand it (Codex R3 finding 2)
+        "ssl.com; x={#APEX}",
+        "ssl.com; x=}",
+        "ssl.com; x=1\nssl.com",  # control/non-ASCII: storage untested
+        "ssl.com; x=\x00",
+        "ssl.com; x=café",
+        "x" * (PERSIST_VALUE_MAX_LEN + 1),  # overflows functions.parameter (Codex R3 finding 1)
+    ])
+    def test_unusable_value_is_refused(self, bad: str) -> None:
+        result = persist_expected_by_apex([_domain("a.edu")], [bad])
+        assert result.values == {"a.edu": PERSIST_VALUE_UNAVAILABLE}
+        assert "a.edu" in result.problems
+
+    def test_value_at_length_limit_is_accepted(self) -> None:
+        value = "x" * PERSIST_VALUE_MAX_LEN
+        assert persist_expected_by_apex([_domain("a.edu")], [value]) == ({"a.edu": value}, {})
+
+    def test_length_limit_fits_zabbix_parameter_column(self) -> None:
+        # The longest parameter the template builds from the value must fit
+        # Zabbix's 255-character functions.parameter column.
+        assert len(f'#3,"like","\\"{"x" * PERSIST_VALUE_MAX_LEN}\\""') <= 255
+
+    def test_real_values_are_usable(self) -> None:
+        assert persist_value_problem(_PERSIST_VALUE) is None
+        assert persist_value_problem(self._OTHER) is None
+
+    def test_nameless_record_is_dropped_like_discovery(self) -> None:
+        result = persist_expected_by_apex([_domain(None), _domain("a.edu")], ["", _PERSIST_VALUE])  # type: ignore[arg-type]
+        assert result == ({"a.edu": _PERSIST_VALUE}, {})
+
+    def test_keys_always_equal_apex_names(self) -> None:
+        # Every apex keeps its row, problem or not, so none loses its checks.
+        persist = [_domain("b.edu"), _domain("a.edu"), _domain("c.edu")]
+        result = persist_expected_by_apex(persist, [_PERSIST_VALUE, "", self._OTHER])
+        assert sorted(result.values) == persist_apex_names(persist)
+
+    def test_placeholder_is_pinned(self) -> None:
+        # Docs and trigger descriptions quote it verbatim; a change must be
+        # deliberate (Codex R3 finding 3: a weaker sentinel passed before).
+        assert PERSIST_VALUE_UNAVAILABLE == "NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG"
+
+    def test_placeholder_passes_its_own_guard(self) -> None:
+        # It goes into the same trigger parameter as a real value.
+        assert persist_value_problem(PERSIST_VALUE_UNAVAILABLE) is None
+
+    def test_placeholder_cannot_match_a_real_record(self) -> None:
+        # The trigger looks for it quoted, so a real record would have to
+        # contain the whole quoted placeholder.
+        for real in (_PERSIST_VALUE, self._OTHER):
+            assert f'"{PERSIST_VALUE_UNAVAILABLE}"' not in f'"{real}"'
+            assert PERSIST_VALUE_UNAVAILABLE not in real
+
+    def test_length_mismatch_is_a_bug_not_a_silent_pass(self) -> None:
+        with pytest.raises(ValueError):
+            persist_expected_by_apex([_domain("a.edu")], [])
+
 
 class TestPersistDiscoveryValue:
-    """The LLD JSON the template's {#APEX} prototypes are built from."""
+    """The LLD JSON the template's {#APEX}/{#PERSIST.EXPECTED} prototypes are built from."""
 
-    def test_sorted_deduplicated_rows(self) -> None:
-        value = persist_discovery_value([
-            _domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu"),
-        ])
-        assert json.loads(value) == [{"{#APEX}": "a.example.edu"}, {"{#APEX}": "b.example.edu"}]
+    def test_sorted_rows_carry_the_expected_value(self) -> None:
+        value = persist_discovery_value({"b.example.edu": "vb", "a.example.edu": "va"})
+        assert json.loads(value) == [
+            {"{#APEX}": "a.example.edu", "{#PERSIST.EXPECTED}": "va"},
+            {"{#APEX}": "b.example.edu", "{#PERSIST.EXPECTED}": "vb"},
+        ]
 
     def test_empty_is_an_empty_array(self) -> None:
         # [] is a complete answer ("no persist domains"), not a missing one.
-        assert persist_discovery_value([]) == "[]"
+        assert persist_discovery_value({}) == "[]"
 
     def test_apex_names_match_discovery_rows(self) -> None:
         # The apex-count metric is len() of these, so it must equal the rows.
         persist = [_domain("b.example.edu"), _domain("a.example.edu"), _domain("b.example.edu")]
         names = persist_apex_names(persist)
         assert names == ["a.example.edu", "b.example.edu"]
-        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(persist))] == names
+        expected = persist_expected_by_apex(persist, [_PERSIST_VALUE] * 3)
+        assert [r["{#APEX}"] for r in json.loads(persist_discovery_value(expected.values))] == names
 
 
 def _order(

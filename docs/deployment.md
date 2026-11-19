@@ -199,12 +199,6 @@ deployment sequence:
    - `{$CERTINEXT.ENV}` — `prod` or `sandbox`. Defaults to `prod`; a sandbox
      host left at the default raises the HIGH *pusher data from the wrong
      environment* trigger on its first run.
-   - `{$CERTINEXT.PERSIST.EXPECTED}` — that environment's
-     `_validation-persist` TXT value, **without** the surrounding quotes.
-     Enter the full string, e.g. `ssl.com; accounturi=https://…`, not just
-     the CA or API hostname: Zabbix accepts any value and would just raise
-     *record missing* on every apex. The default `CONFIGURE-ME` fails closed: every discovered apex raises
-     *record missing* until it is set.
    - `{$CERTINEXT.SENDER.ALLOWED}` — the source IP(s) of the machine running
      `certinext-zabbix-push`. The committed value (`127.0.0.1`) rejects
      every real sender until you do this.
@@ -249,7 +243,7 @@ small number that clears on its own within the macro window).
 |---|---|---|---|
 | frequent | every 6 hours | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
 | order-health | hourly | `certinext-zabbix-push --order-health` | `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch, 2 pages at current order volume) |
-| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.token_domains`, `certinext.dcv.min_days_left`, `certinext.dcv.persist_min_days_left`, `certinext.dcv.persist_apexes` and the dns-persist discovery value (a DCV-method read per domain plus a detail call **per verified domain** — the expensive one; a real prod run took 3m25s before the method read was added) |
+| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.token_domains`, `certinext.dcv.min_days_left`, `certinext.dcv.persist_min_days_left`, `certinext.dcv.persist_apexes` and the dns-persist discovery value (each apex with the CA's expected record value) (a DCV-method read per domain plus a detail call **per verified domain** — the expensive one; a real prod run took 3m25s before the method read was added) |
 
 Every run also sends `certinext.env`, the environment it connected to,
 which the template compares against the host's `{$CERTINEXT.ENV}`.
@@ -462,9 +456,15 @@ order-health — alert after one missed hourly run is tolerated, a second
 alerts, via `{$CERTINEXT.NODATA.ORDER_HEALTH}` (3h); daily (expiry) —
 one missed daily run alerts, via `{$CERTINEXT.NODATA.DAILY}` (26h). If
 you change a timer's cadence materially, adjust the matching macro on the
-Zabbix side. The daily window also covers the dns-persist discovery: the
-pusher never sends the daily items without it, so a stale discovery list
-shows up as *no data from pusher (daily expiry run)*.
+Zabbix side. The daily window also covers *sending* the dns-persist
+discovery: the pusher never sends the daily items without it, so a
+discovery list that stopped arriving shows up as *no data from pusher
+(daily expiry run)*. It does not prove Zabbix *applied* the list: if LLD
+fails to create or update a discovered trigger, the push still succeeds
+and the old trigger can keep checking the old value. That error shows on
+the discovery rule itself (*Data collection → Hosts → Discovery*, the
+rule's *Info* column), so check it after a template import or a change in
+the CA's value.
 
 The dns-persist lookups are agent checks, not pusher data, with their own
 cadence: `{$CERTINEXT.DNS.INTERVAL.LOCAL}` (5m) and
@@ -504,9 +504,8 @@ template change:
 
 1. A sandbox host, set up as in
    [One-time Zabbix server setup](#one-time-zabbix-server-setup-not-a-playbook-task)
-   step 2, with `{$CERTINEXT.ENV}` = `sandbox`, the sandbox's own
-   `{$CERTINEXT.PERSIST.EXPECTED}`, and `{$CERTINEXT.SENDER.ALLOWED}`.
-   A low-volume sandbox account will also want a higher
+   step 2, with `{$CERTINEXT.ENV}` = `sandbox` and
+   `{$CERTINEXT.SENDER.ALLOWED}`. A low-volume sandbox account will also want a higher
    `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}`.
 2. A separate env file with the **sandbox** credentials and host name, e.g.
    `/etc/certinext-zabbix/certinext-zabbix-sandbox.env` (mode 0600,
@@ -559,14 +558,13 @@ carried over. They differ in which Zabbix hosts receive 0.2.0's data:
    ready to run; it can't be produced inside the window. Each
    environment's env file needs its own `ZABBIX_HOSTNAME` (see
    [Configuration-management checklist](#configuration-management-checklist)).
-2. **Have each environment's `{$CERTINEXT.PERSIST.EXPECTED}` value ready.**
-   It is the `DNS-PERSIST` option's record value in the domain's DCV detail,
-   for example
-   `certinext-domains [--profile sandbox] get-dcv <apex> --validated-by SSLCOM`.
-   It names the CertiNext account, so one value covers every apex in an
-   environment, and prod and sandbox differ. Take it from CertiNext, not
-   from DNS: reading it back from the published record makes the check
-   circular.
+2. **No dns-persist value to prepare.** From 0.2.0rc3 the daily run sends
+   each apex's expected `_validation-persist` value from the CA's API. A
+   host coming from 0.2.0rc1/rc2 has a `{$CERTINEXT.PERSIST.EXPECTED}`
+   host macro: delete it after the upgrade, since nothing reads it. To see
+   the value the pusher will send, run
+   `certinext-domains [--profile sandbox] get-dcv <apex> --validated-by SSLCOM`
+   (the `DNS-PERSIST` option's record value).
 3. **Check the new network paths** from the pusher machine:
    `dig +short @1.1.1.1 TXT _validation-persist.<apex>` and the same with
    `@8.8.8.8` should both return the record. From the Zabbix server or
@@ -601,8 +599,8 @@ carried over. They differ in which Zabbix hosts receive 0.2.0's data:
 3. **Turn the existing host into the prod host.** `{$CERTINEXT.ENV}`
    defaults to `prod`, so it needs no macro. Add an **agent interface**
    pointing at the pusher machine if the host doesn't have one (it does
-   if the host *is* the pusher machine with an agent template linked), and
-   set `{$CERTINEXT.PERSIST.EXPECTED}`. Existing host macros, such as
+   if the host *is* the pusher machine with an agent template linked).
+   Existing host macros, such as
    `{$CERTINEXT.SENDER.ALLOWED}` and threshold overrides, keep working:
    no macro was renamed.
 4. **Review the DCV-threshold overrides.** If you raised or disabled the
@@ -615,8 +613,7 @@ carried over. They differ in which Zabbix hosts receive 0.2.0's data:
 5. **If you monitor the sandbox**, create its new host as in
    [Optional: monitoring the sandbox too](#optional-monitoring-the-sandbox-too),
    step 1. It starts with none of the old host's macros. Set
-   `{$CERTINEXT.ENV}` = `sandbox`, the sandbox's own
-   `{$CERTINEXT.PERSIST.EXPECTED}`, and `{$CERTINEXT.SENDER.ALLOWED}`
+   `{$CERTINEXT.ENV}` = `sandbox` and `{$CERTINEXT.SENDER.ALLOWED}`
    (copy the old host's value; 0.1.x installs set it there as a host
    override). If your sandbox action condition matches a literal `env` tag,
    it keeps working: the tag value is still `sandbox`.
@@ -627,8 +624,8 @@ carried over. They differ in which Zabbix hosts receive 0.2.0's data:
    as in [One-time Zabbix server setup](#one-time-zabbix-server-setup-not-a-playbook-task)
    steps 2–3. Each needs an agent interface pointing at the pusher machine,
    the same *Monitored by* as the trapper sends, the template linked, and
-   all three macros: `{$CERTINEXT.ENV}`, `{$CERTINEXT.PERSIST.EXPECTED}`
-   and `{$CERTINEXT.SENDER.ALLOWED}` (copy the old host's value). Carry
+   both macros: `{$CERTINEXT.ENV}` and `{$CERTINEXT.SENDER.ALLOWED}`
+   (copy the old host's value). Carry
    over any threshold overrides you still want; the old host's macros don't
    move.
 4. Leave the old host linked for now. Step 9 clears it once the new hosts
@@ -667,7 +664,7 @@ run:
 | Trigger | Opens at once when |
 | --- | --- |
 | pusher data from the wrong environment (HIGH) | a run reaches a host whose `{$CERTINEXT.ENV}` doesn't match: an unchanged sandbox `ZABBIX_HOSTNAME`, or a sandbox host left at the `prod` default |
-| dns-persist record missing for `{#APEX}` (HIGH, per apex) | `{$CERTINEXT.PERSIST.EXPECTED}` is unset (`CONFIGURE-ME`) or wrong, or the record really is gone |
+| dns-persist record missing for `{#APEX}` (HIGH, per apex) | the published record doesn't hold the value the CA's API gives for that apex, or the record is gone. If the trigger's expected value reads `NO-USABLE-DNS-PERSIST-VALUE-FROM-CA-API-SEE-PUSHER-LOG`, DNS may be fine: the pusher log says why the CA's value was unusable |
 | dns-persist record not visible publicly / lookup failing (AVERAGE, per apex) | outbound DNS to the public resolvers is blocked, or the agent can't run the lookup |
 | no certificate issued for over `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` days (WARNING) | the account issues less often than the macro (default 30 days): typical of a sandbox. The item existed in 0.1.x, but the trigger didn't |
 | dns-persist reuse period lapsed (INFORMATION) | the SSL.com reuse window has passed; informational by design |

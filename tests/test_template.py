@@ -15,7 +15,6 @@ import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -171,7 +170,6 @@ class TestMacros:
 
     @pytest.mark.parametrize("name", [
         "{$CERTINEXT.ENV}",
-        "{$CERTINEXT.PERSIST.EXPECTED}",
         "{$CERTINEXT.DNS.RESOLVER.1}",
         "{$CERTINEXT.DNS.RESOLVER.2}",
         "{$CERTINEXT.DNS.INTERVAL.LOCAL}",
@@ -195,10 +193,10 @@ class TestMacros:
         }
         assert not used - defined, f"undeclared macros: {used - defined}"
 
-    def test_persist_expected_fails_closed(self, template: dict[str, Any]) -> None:
-        """The committed default matches no real record (the repo mirrors publicly)."""
-        macros = {m["macro"]: m["value"] for m in template["macros"]}
-        assert macros["{$CERTINEXT.PERSIST.EXPECTED}"] == "CONFIGURE-ME"
+    def test_no_hand_set_persist_macro(self, export: dict[str, Any]) -> None:
+        """The expected TXT value comes from the pusher, never a user macro (#12)."""
+        hits = [n for n in _walk(export) if isinstance(n, str) and "{$CERTINEXT.PERSIST.EXPECTED" in n]
+        assert not hits
 
     def test_macros_sorted(self, template: dict[str, Any]) -> None:
         """Macros are in Zabbix's export order, so a re-import doesn't report a change."""
@@ -257,7 +255,7 @@ class TestTriggers:
         """
         finds = [
             (t["name"], t["expression"]) for t in _all_triggers(export)
-            if "PERSIST.EXPECTED" in t["expression"]
+            if "_validation-persist" in t["expression"] and "find(" in t["expression"]
         ]
         assert len(finds) == 2
         for name, expr in finds:
@@ -276,6 +274,36 @@ class TestTriggers:
         assert len(guard) == 1
         assert '<>"{$CERTINEXT.ENV}"' in guard[0]["expression"]
         assert guard[0]["priority"] == "HIGH"
+
+    def test_persist_find_matches_pusher_value(self, export: dict[str, Any]) -> None:
+        """Every dns-persist ``find()`` matches the quoted ``{#PERSIST.EXPECTED}`` (#12).
+
+        The pusher sends the CA's value per discovery row; the template adds
+        the TXT quotes, so the pattern is the whole quoted string.
+        """
+        patterns = [
+            m.group(1)
+            for t in _all_triggers(export) if "_validation-persist" in t["expression"]
+            for m in re.finditer(r'find\([^)]*,"like",("(?:\\.|[^"\\])*")\)', t["expression"])
+        ]
+        assert len(patterns) == 3  # record missing, 2 x not visible publicly
+        assert set(patterns) == {r'"\"{#PERSIST.EXPECTED}\""'}
+
+    def test_persist_find_alerts_on_absence(self, export: dict[str, Any]) -> None:
+        """Every dns-persist ``find()`` is compared ``=0``: alert when the value is absent.
+
+        ``=1`` would alert while the record is healthy and stay quiet when
+        it's gone, and the pattern test above would still pass (Codex R3
+        finding 3). Dependency copies are held equal to their trigger by
+        ``test_dependencies_match_a_trigger``.
+        """
+        comparisons = [
+            m.group(1)
+            for t in _all_triggers(export) if "_validation-persist" in t["expression"]
+            for m in re.finditer(r'find\([^)]*,"like","(?:\\.|[^"\\])*"\)([<>=]*\d*)', t["expression"])
+        ]
+        assert len(comparisons) == 3
+        assert comparisons == ["=0"] * 3
 
 
 class TestStructure:
@@ -318,8 +346,7 @@ class TestStructure:
 
     def test_lld_macros_are_ones_the_pusher_sends(self, template: dict[str, Any]) -> None:
         """Every {#MACRO} in the persist rule is a column of the pusher's discovery rows."""
-        domain = SimpleNamespace(name="example.edu")
-        row = json.loads(zabbix_push.persist_discovery_value([domain]))[0]  # type: ignore[list-item]
+        row = json.loads(zabbix_push.persist_discovery_value({"example.edu": "ssl.com"}))[0]
         rule = next(r for r in _discovery_rules(template) if r["key"] == zabbix_push.KEY_PERSIST_DISCOVERY)
         used = {m for n in _walk(rule) if isinstance(n, str) for m in _LLD_MACRO_RE.findall(n)}
         assert used, "no LLD macros found in the persist rule"
