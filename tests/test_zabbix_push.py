@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 from certinext.exceptions import CertiNextAPIError
-from certinext.models.domains import Domain
+from certinext.models.domains import DcvInfo, Domain
 from certinext.orders import OrderRecord
 from zabbix_utils.exceptions import ProcessingError
 
@@ -31,20 +31,25 @@ from certinext_zabbix.zabbix_push import (
     KEY_ORDERS_UNISSUED,
     KEY_PERSIST_APEXES,
     KEY_PERSIST_DISCOVERY,
+    KEY_PERSIST_EXPECTED,
     KEY_PERSIST_MIN_DAYS_LEFT,
     KEY_TOKEN_DOMAINS,
     KEY_TOTAL,
     KEY_UNVERIFIED,
     DomainScope,
     OrderBuckets,
+    PersistExpectedError,
     bucket_orders,
     collect_domain_metrics,
     collect_expiry_metrics,
     collect_order_metrics,
     fetch_dcv_methods,
     fetch_orders,
+    normalise_persist_value,
     persist_apex_names,
     persist_discovery_value,
+    persist_expected_value,
+    persist_record_value,
     push_metrics,
     refresh_domain,
     scope_domains,
@@ -104,6 +109,7 @@ class TestBareKeys:
         assert KEY_TOKEN_DOMAINS == "certinext.dcv.token_domains"
         assert KEY_PERSIST_MIN_DAYS_LEFT == "certinext.dcv.persist_min_days_left"
         assert KEY_PERSIST_APEXES == "certinext.dcv.persist_apexes"
+        assert KEY_PERSIST_EXPECTED == "certinext.dcv.persist_expected"
 
 
 class TestCollectDomainMetrics:
@@ -204,19 +210,51 @@ class TestCollectExpiryMetrics:
         }
 
 
-def _method_domain(name: str, method: str = "DNS-TXT") -> MagicMock:
+# Placeholder only: the real per-account value must never land in this
+# repo (it mirrors publicly — certinext-zabbix#12).
+_PERSIST_VALUE = "ca.example; accounturi=https://ca.example.invalid/acct/PLACEHOLDER"
+
+
+def _dcv_info(method: str, persist_value: str | None = _PERSIST_VALUE) -> DcvInfo:
+    """Build a real ``DcvInfo`` like an SSL.com ``get_dcv()`` response.
+
+    Args:
+        method: Upper-case DCV method (the selected option).
+        persist_value: ``recordValue`` of the offered DNS-PERSIST option, or
+            None to offer no persist option at all.
+
+    Returns:
+        The parsed DcvInfo.
+    """
+    options: list[dict[str, Any]] = [
+        {"optionId": "txt", "method": "dns-txt", "recordValue": "token123"},
+    ]
+    if persist_value is not None:
+        options.append({"optionId": "persist", "method": "dns-persist", "recordValue": persist_value})
+    selected = next((o for o in options if o["method"].upper() == method), options[0])
+    return DcvInfo.from_wire({
+        "method": method, "validatedBy": "SSLCOM", "optionId": selected["optionId"],
+        "recordValue": selected["recordValue"], "options": options,
+    })
+
+
+def _method_domain(
+    name: str, method: str = "DNS-TXT", persist_value: str | None = _PERSIST_VALUE,
+) -> MagicMock:
     """Build a mock domain whose ``get_dcv()`` reports *method*.
 
     Args:
         name: Domain name.
         method: Upper-case DCV method returned as ``DcvInfo.method``.
+        persist_value: The DNS-PERSIST option's record value, or None for
+            no persist option.
 
     Returns:
-        A MagicMock with ``name`` and a ``get_dcv`` returning *method*.
+        A MagicMock with ``name`` and a ``get_dcv`` returning a DcvInfo.
     """
     domain = MagicMock()
     domain.name = name
-    domain.get_dcv.return_value = SimpleNamespace(method=method)
+    domain.get_dcv.return_value = _dcv_info(method, persist_value)
     return domain
 
 
@@ -236,7 +274,7 @@ class TestFetchDcvMethods:
     def test_retries_transient_failure_then_succeeds(self) -> None:
         flaky = _method_domain("flaky.edu", DCV_METHOD_PERSIST)
         flaky.get_dcv.side_effect = [
-            httpx.ReadTimeout("timed out"), SimpleNamespace(method=DCV_METHOD_PERSIST),
+            httpx.ReadTimeout("timed out"), _dcv_info(DCV_METHOD_PERSIST),
         ]
         with patch("certinext_zabbix.zabbix_push.time.sleep") as mock_sleep:
             split = fetch_dcv_methods([flaky], retry_delay=5.0)
@@ -262,6 +300,84 @@ class TestFetchDcvMethods:
         assert split.failed == [weird]
         assert weird.get_dcv.call_count == 1
         mock_sleep.assert_not_called()
+
+    def test_persist_values_parallel_to_persist(self) -> None:
+        a = _method_domain("a.edu", DCV_METHOD_PERSIST)
+        txt = _method_domain("txt.edu", "DNS-TXT")
+        b = _method_domain("b.edu", DCV_METHOD_PERSIST, persist_value=None)
+        split = fetch_dcv_methods([a, txt, b])
+        assert split.persist == [a, b]
+        assert split.persist_values == [_PERSIST_VALUE, ""]
+
+    def test_missing_persist_value_is_not_a_failed_domain(self) -> None:
+        # The value read must never withhold discovery (#12).
+        d = _method_domain("p.edu", DCV_METHOD_PERSIST)
+        d.get_dcv.return_value = SimpleNamespace(method=DCV_METHOD_PERSIST)
+        split = fetch_dcv_methods([d])
+        assert split.persist == [d]
+        assert split.failed == []
+        assert split.persist_values == [""]
+
+
+class TestPersistRecordValue:
+    """Reading and normalising the DNS-PERSIST option's record value."""
+
+    def test_prefers_the_persist_option(self) -> None:
+        assert persist_record_value(_dcv_info(DCV_METHOD_PERSIST)) == _PERSIST_VALUE
+
+    def test_falls_back_to_selected_record_value(self) -> None:
+        info = DcvInfo.from_wire({
+            "method": "dns-persist", "validatedBy": "SSLCOM", "recordValue": _PERSIST_VALUE,
+        })
+        assert persist_record_value(info) == _PERSIST_VALUE
+
+    def test_options_without_persist_entry_fail_closed(self) -> None:
+        # The top-level value then belongs to some other option (a token);
+        # sending it would fail open.
+        info = _dcv_info(DCV_METHOD_PERSIST, persist_value=None)
+        assert info.record_value == "token123"
+        assert persist_record_value(info) == ""
+
+    @pytest.mark.parametrize("raw", [
+        _PERSIST_VALUE, f'"{_PERSIST_VALUE}"', f"  {_PERSIST_VALUE}\n", f'  " {_PERSIST_VALUE} " ',
+    ])
+    def test_normalises_to_unquoted_form(self, raw: str) -> None:
+        # The macro holds the value without quotes; the template adds them.
+        assert normalise_persist_value(raw) == _PERSIST_VALUE
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", '""'])
+    def test_blank_is_empty(self, raw: str | None) -> None:
+        assert normalise_persist_value(raw) == ""
+
+    def test_lone_quote_kept(self) -> None:
+        assert normalise_persist_value('"') == '"'
+
+
+class TestPersistExpectedValue:
+    """One agreed value or nothing: fail closed (certinext-zabbix#12)."""
+
+    def test_agreeing_apexes_return_the_value(self) -> None:
+        persist = [_domain("a.edu"), _domain("b.edu")]
+        assert persist_expected_value(persist, [_PERSIST_VALUE, _PERSIST_VALUE]) == _PERSIST_VALUE
+
+    def test_no_persist_domains_is_none_not_an_error(self) -> None:
+        assert persist_expected_value([], []) is None
+
+    def test_missing_value_raises(self) -> None:
+        with pytest.raises(PersistExpectedError) as exc_info:
+            persist_expected_value([_domain("a.edu"), _domain("b.edu")], [_PERSIST_VALUE, ""])
+        assert exc_info.value.apexes_by_value[""] == ["b.edu"]
+
+    def test_mixed_values_raise_and_list_apexes_per_value(self) -> None:
+        other = "other.example; accounturi=https://other.example.invalid/acct/2"
+        persist = [_domain("c.edu"), _domain("a.edu"), _domain("b.edu")]
+        with pytest.raises(PersistExpectedError) as exc_info:
+            persist_expected_value(persist, [_PERSIST_VALUE, other, _PERSIST_VALUE])
+        assert exc_info.value.apexes_by_value == {_PERSIST_VALUE: ["b.edu", "c.edu"], other: ["a.edu"]}
+
+    def test_length_mismatch_is_a_bug_not_a_silent_pass(self) -> None:
+        with pytest.raises(ValueError):
+            persist_expected_value([_domain("a.edu")], [])
 
 
 class TestPersistDiscoveryValue:

@@ -566,7 +566,9 @@ and `Ansible/tower-projects@feat/certinext-zabbix-0.2.0-env-hosts`. Their placeh
 - F17 → **certinext-zabbix#12, before 0.2.0 stable.** ~~Original design (note 22174): send `{#PERSIST.EXPECTED}`
   in each discovery row and match on it.~~ Replaced (note 22186) by a drift check: keep the proven host-macro
   matcher; the daily run sends the CA's value to a text trapper; one trigger compares it to the macro.
-  Gated on a live test of a user macro inside a string constant on 7.0.
+  Gated on a live test of a user macro inside a string constant on 7.0. **Implemented on
+  `feat/persist-expected-drift-check` (0.2.0rc3)**; design and evidence in ADR 0014's amendment. Live import
+  plus push still owed.
 - One prod apex carries a persist value for a second CA: ask who authorised it.
 
 ## References

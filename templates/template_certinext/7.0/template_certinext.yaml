@@ -343,6 +343,29 @@ zabbix_export:
           value: '{$CERTINEXT.ENV}'
         - tag: scope
           value: availability
+    - uuid: 3e3b58f1800347be857983ca8ee43ef5
+      name: 'CertiNext {$CERTINEXT.ENV}: dns-persist value the CA expects'
+      type: TRAP
+      key: certinext.dcv.persist_expected
+      delay: '0'
+      history: 90d
+      value_type: TEXT
+      trends: '0'
+      allowed_hosts: '{$CERTINEXT.SENDER.ALLOWED}'
+      description: |
+        The _validation-persist TXT value the CA's API says to publish
+        (the DNS-PERSIST option's record value), without its quotes, sent
+        by the daily --expiry-days run. It is per CertiNext account, so the
+        pusher sends it only when every persist apex reports the same
+        value; a missing or disagreeing value sends nothing and the
+        no-data trigger fires. Compared against
+        {$CERTINEXT.PERSIST.EXPECTED}, which the per-apex TXT checks match
+        on. The source is the CA's API, not DNS, so this is not circular.
+        Its two triggers are in the template-level trigger list (they also
+        read persist_apexes).
+      tags:
+      - tag: env
+        value: '{$CERTINEXT.ENV}'
         # ------------------------------------------------ order health ---
         # Orders Report metrics (--order-health on its own hourly pusher run,
         # separate from --expiry-days — sysadmin/certinext-zabbix#8).
@@ -757,7 +780,7 @@ zabbix_export:
       description: 'How long a generated certificate may sit undownloaded before its trigger fires. Longer than STUCK_AGE: a manual portal order can legitimately wait for someone to collect it, whereas an ACME order should download within seconds'
     - macro: '{$CERTINEXT.PERSIST.EXPECTED}'
       value: CONFIGURE-ME
-      description: 'SET ON EACH HOST: the exact value of your _validation-persist TXT record, without the surrounding quotes: the full string (e.g. ssl.com; accounturi=https://...), not just the CA or API hostname. One value per host; there is no per-apex override (Zabbix does not substitute an LLD macro in an unquoted macro context). The default matches nothing, so every discovered apex alerts until it is set — fail closed.'
+      description: 'SET ON EACH HOST: the exact value of your _validation-persist TXT record, without the surrounding quotes: the full string (e.g. ssl.com; accounturi=https://...), not just the CA or API hostname. One value per host; there is no per-apex override (Zabbix does not substitute an LLD macro in an unquoted macro context). The default matches nothing, so every discovered apex alerts until it is set — fail closed. The daily run also sends the CA''s own value (certinext.dcv.persist_expected), and an AVERAGE trigger fires when this macro differs from it.'
     - macro: '{$CERTINEXT.SENDER.ALLOWED}'
       value: 127.0.0.1
       description: 'REQUIRED PER-DEPLOYMENT EDIT: source IP(s) of the host running certinext-zabbix-push; the committed placeholder rejects all senders until you set it.'
@@ -824,3 +847,38 @@ zabbix_export:
     tags:
     - tag: env
       value: '{$CERTINEXT.ENV}'
+  - uuid: 5fbfcc83d12c49aaae0a7c70033f4e2e
+    expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_expected)<>"{$CERTINEXT.PERSIST.EXPECTED}" and last(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_apexes)>0'
+    name: 'CertiNext {$CERTINEXT.ENV}: dns-persist EXPECTED differs from the CA''s value'
+    opdata: 'CA value: {ITEM.LASTVALUE1}'
+    priority: AVERAGE
+    description: |
+      {$CERTINEXT.PERSIST.EXPECTED} on this host is not the value the CA's
+      API says the _validation-persist record must hold. Either the macro
+      was set wrong (every apex's "record missing" fires too), or the CA
+      changed the value, e.g. a new account URI: DNS still matches the
+      macro, so nothing else fires, but the next issuance fails DCV.
+      Compare the operational data with the macro. If the macro is wrong,
+      fix it. If the CA changed, publish the new value with dcv-update
+      first, then update the macro. Clears on the next daily run after
+      the two agree. Gated on persist_apexes>0, so a host with no
+      dns-persist apexes left can't hold it open on a stale value.
+    tags:
+    - tag: env
+      value: '{$CERTINEXT.ENV}'
+  - uuid: ad16aea475d04a45b05b9bfb7cf79aee
+    expression: 'nodata(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_expected,{$CERTINEXT.NODATA.DAILY})=1 and last(/CertiNext DCV by Zabbix trapper/certinext.dcv.persist_apexes)>0'
+    name: 'CertiNext {$CERTINEXT.ENV}: no dns-persist expected value from pusher'
+    priority: WARNING
+    description: |
+      No CA record value received for {$CERTINEXT.NODATA.DAILY} while
+      dns-persist apexes exist, so the EXPECTED drift check is blind. The
+      pusher withholds the value, and exits 1, when the CA returns none
+      for an apex or the apexes disagree; its log line "Skipping
+      dns-persist expected value" lists the apexes per value. If the whole
+      daily run is failing, the expiry no-data trigger fires too.
+    tags:
+    - tag: env
+      value: '{$CERTINEXT.ENV}'
+    - tag: scope
+      value: availability

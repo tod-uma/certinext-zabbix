@@ -21,7 +21,9 @@ Three metric families, matching the three designed checks:
   for token-method domains, how many expire within the renewal lead time
   and the minimum days left; for ``DNS-PERSIST`` domains, only the minimum
   days left of the reuse period, plus an LLD list of their apexes so Zabbix
-  agent items can check the ``_validation-persist`` TXT record itself.
+  agent items can check the ``_validation-persist`` TXT record itself, and
+  the record value the CA expects there, so the template can catch a stale
+  ``{$CERTINEXT.PERSIST.EXPECTED}`` (:func:`persist_expected_value`).
   Pushed only when the caller opts in (daily run).
 - **Order-health metrics** (one unfiltered Orders Report list call, split
   client-side by :func:`bucket_orders`): orders the CA never issued a
@@ -46,7 +48,7 @@ import structlog
 from certinext import filter_needs_dcv
 from certinext.cli_support import log_caught_exception
 from certinext.exceptions import CertiNextAPIError
-from certinext.models.domains import Domain
+from certinext.models.domains import DcvInfo, Domain
 from certinext.orders import OrderAccessor, OrderRecord
 from zabbix_utils import ItemValue, Sender
 from zabbix_utils.exceptions import ProcessingError
@@ -68,6 +70,7 @@ KEY_PERSIST_DISCOVERY = "certinext.dcv.persist.discovery"
 KEY_TOKEN_DOMAINS = "certinext.dcv.token_domains"
 KEY_PERSIST_MIN_DAYS_LEFT = "certinext.dcv.persist_min_days_left"
 KEY_PERSIST_APEXES = "certinext.dcv.persist_apexes"
+KEY_PERSIST_EXPECTED = "certinext.dcv.persist_expected"
 
 ENV_PROD = "prod"
 ENV_SANDBOX = "sandbox"
@@ -196,11 +199,17 @@ class DcvMethodSplit(NamedTuple):
     retries. A non-empty *failed* means *persist* and *token* are both
     incomplete, so a caller must not publish anything derived from them
     (an LLD list missing an apex would delete that apex's items).
+
+    *persist_values* runs parallel to *persist*: each persist domain's
+    DNS-PERSIST record value as :func:`persist_record_value` normalised it,
+    ``""`` when the CA offered none. Reading it never moves a domain to
+    *failed*, so it can't withhold discovery (certinext-zabbix#12).
     """
 
     persist: list[Domain]
     token: list[Domain]
     failed: list[Domain]
+    persist_values: list[str]
 
 
 def fetch_dcv_methods(
@@ -225,12 +234,14 @@ def fetch_dcv_methods(
     Returns:
         The split, each list in input order. ``DNS-PERSIST`` domains go to
         ``persist``; every other method (``DNS-TXT``, ``HTTP-URL``,
-        ``DNS-CNAME``, …) goes to ``token``.
+        ``DNS-CNAME``, …) goes to ``token``. Each persist domain's record
+        value comes from the same ``get_dcv()`` response, so it costs no
+        extra API call.
     """
-    split = DcvMethodSplit(persist=[], token=[], failed=[])
+    split = DcvMethodSplit(persist=[], token=[], failed=[], persist_values=[])
     for d in domains:
         try:
-            method = _get_dcv_method(d, attempts=attempts, retry_delay=retry_delay)
+            info = _get_dcv(d, attempts=attempts, retry_delay=retry_delay)
         except (CertiNextAPIError, httpx.HTTPError) as exc:
             # One concise line per domain, as for refresh failures: a
             # degraded API can fail every domain in a run.
@@ -245,12 +256,16 @@ def fetch_dcv_methods(
             )
             split.failed.append(d)
             continue
-        (split.persist if method == DCV_METHOD_PERSIST else split.token).append(d)
+        if info.method == DCV_METHOD_PERSIST:
+            split.persist.append(d)
+            split.persist_values.append(persist_record_value(info))
+        else:
+            split.token.append(d)
     return split
 
 
-def _get_dcv_method(d: Domain, *, attempts: int, retry_delay: float) -> str:
-    """Return one domain's upper-case DCV method, retrying transient failures.
+def _get_dcv(d: Domain, *, attempts: int, retry_delay: float) -> DcvInfo:
+    """Return one domain's DCV info, retrying transient failures.
 
     Args:
         d: The domain to query.
@@ -258,7 +273,8 @@ def _get_dcv_method(d: Domain, *, attempts: int, retry_delay: float) -> str:
         retry_delay: Seconds to wait between tries.
 
     Returns:
-        ``DcvInfo.method`` (already upper-cased by certinext).
+        The parsed :class:`DcvInfo`; its ``method`` is already upper-cased
+        by certinext.
 
     Raises:
         CertiNextAPIError: On the final attempt, if every retry also failed.
@@ -266,7 +282,7 @@ def _get_dcv_method(d: Domain, *, attempts: int, retry_delay: float) -> str:
     """
     for attempt in range(1, attempts + 1):
         try:
-            return d.get_dcv().method
+            return d.get_dcv()
         except (CertiNextAPIError, httpx.HTTPError):
             if attempt >= attempts:
                 raise
@@ -315,6 +331,121 @@ def persist_discovery_value(persist: Sequence[Domain]) -> str:
         are none, which tells Zabbix the set is genuinely empty.
     """
     return json.dumps([{"{#APEX}": name} for name in persist_apex_names(persist)])
+
+
+def normalise_persist_value(raw: str | None) -> str:
+    """Normalise a dns-persist record value to the macro's unquoted form.
+
+    ``{$CERTINEXT.PERSIST.EXPECTED}`` holds the value without its TXT quotes
+    (the template's ``find()`` adds them), so the value sent for the drift
+    trigger must be bare too. The API returns it bare today; one pair of
+    surrounding double quotes is stripped anyway, so a CA that starts
+    quoting it doesn't open a false drift alert.
+
+    Args:
+        raw: The wire ``recordValue``, or ``None``.
+
+    Returns:
+        The trimmed value with one pair of surrounding quotes removed;
+        ``""`` for ``None`` or blank.
+    """
+    value = (raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1].strip()
+    return value
+
+
+def persist_record_value(info: DcvInfo) -> str:
+    """Return the normalised DNS-PERSIST record value from one DCV response.
+
+    Prefers the ``DNS-PERSIST`` entry in :attr:`DcvInfo.options`, the same
+    option ``dcv-update`` publishes from. Only when the payload lists no
+    options at all does it fall back to the selected option's top-level
+    :attr:`DcvInfo.record_value` (the persist one, since only persist
+    domains reach this). Options listed without a persist entry contradict
+    the method, so the top-level value, which may be another option's
+    token, is not trusted. Never raises: a missing value is ``""``, which
+    :func:`persist_expected_value` refuses to send.
+
+    Args:
+        info: A ``get_dcv()`` result whose method is ``DNS-PERSIST``.
+
+    Returns:
+        The value as :func:`normalise_persist_value` leaves it, or ``""``.
+    """
+    options = getattr(info, "options", None) or []
+    opt = next((o for o in options if getattr(o, "method", "") == DCV_METHOD_PERSIST), None)
+    if opt is not None:
+        raw = opt.record_value
+    elif not options:
+        raw = getattr(info, "record_value", "")
+    else:
+        raw = ""
+    return normalise_persist_value(raw if isinstance(raw, str) else None)
+
+
+class PersistExpectedError(ValueError):
+    """The persist domains don't yield one usable record value to send.
+
+    Raised by :func:`persist_expected_value` when a value is missing or the
+    apexes disagree. The caller sends nothing for
+    :data:`KEY_PERSIST_EXPECTED` (fail closed) and the item's ``nodata()``
+    trigger reports the gap.
+
+    Attributes:
+        apexes_by_value: Each distinct value (``""`` for missing) mapped to
+            the sorted domain names that returned it, for the log.
+    """
+
+    def __init__(self, message: str, apexes_by_value: dict[str, list[str]]) -> None:
+        """Store the message and the per-value breakdown.
+
+        Args:
+            message: Why no value can be sent.
+            apexes_by_value: Distinct value to the domains that returned it.
+        """
+        super().__init__(message)
+        self.apexes_by_value = apexes_by_value
+
+
+def persist_expected_value(persist: Sequence[Domain], values: Sequence[str]) -> str | None:
+    """Return the one dns-persist record value the CA expects, for the drift check.
+
+    The value is per CertiNext account, so every persist apex in one
+    environment should report the same string. ``{$CERTINEXT.PERSIST.EXPECTED}``
+    is one value per host (ADR 0014), so this never picks a winner among
+    different values: it fails closed instead (certinext-zabbix#12).
+
+    Args:
+        persist: The persist domains (:attr:`DcvMethodSplit.persist`).
+        values: Their normalised values, parallel to *persist*
+            (:attr:`DcvMethodSplit.persist_values`).
+
+    Returns:
+        The shared value, or ``None`` when there are no persist domains
+        (nothing to compare; not an error).
+
+    Raises:
+        PersistExpectedError: When any domain has no value, or the domains
+            report more than one distinct value.
+        ValueError: When *persist* and *values* differ in length.
+    """
+    by_value: dict[str, list[str]] = {}
+    for d, v in zip(persist, values, strict=True):
+        by_value.setdefault(v, []).append(d.name or "(unnamed)")
+    by_value = {v: sorted(names) for v, names in by_value.items()}
+    if not by_value:
+        return None
+    if "" in by_value:
+        raise PersistExpectedError(
+            "CA returned no DNS-PERSIST record value for some persist domains", by_value,
+        )
+    if len(by_value) > 1:
+        raise PersistExpectedError(
+            "persist domains report different DNS-PERSIST record values", by_value,
+        )
+    (value,) = by_value
+    return value
 
 
 def verified_domains(domains: Sequence[Domain]) -> list[Domain]:

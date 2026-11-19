@@ -249,7 +249,7 @@ small number that clears on its own within the macro window).
 |---|---|---|---|
 | frequent | every 6 hours | `certinext-zabbix-push` | `certinext.domains.total`, `certinext.domains.unverified` (one cheap list call) |
 | order-health | hourly | `certinext-zabbix-push --order-health` | `certinext.orders.unissued`, `certinext.orders.undownloaded`, `certinext.orders.failed_recent`, `certinext.orders.expiring`, `certinext.orders.days_since_issued` (one paginated Orders Report fetch, 2 pages at current order volume) |
-| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.token_domains`, `certinext.dcv.min_days_left`, `certinext.dcv.persist_min_days_left`, `certinext.dcv.persist_apexes` and the dns-persist discovery value (a DCV-method read per domain plus a detail call **per verified domain** — the expensive one; a real prod run took 3m25s before the method read was added) |
+| daily | once a day | `certinext-zabbix-push --expiry-days 14` | `certinext.dcv.expiring`, `certinext.dcv.token_domains`, `certinext.dcv.min_days_left`, `certinext.dcv.persist_min_days_left`, `certinext.dcv.persist_apexes`, `certinext.dcv.persist_expected` and the dns-persist discovery value (a DCV-method read per domain plus a detail call **per verified domain** — the expensive one; a real prod run took 3m25s before the method read was added) |
 
 Every run also sends `certinext.env`, the environment it connected to,
 which the template compares against the host's `{$CERTINEXT.ENV}`.
@@ -668,6 +668,7 @@ run:
 | --- | --- |
 | pusher data from the wrong environment (HIGH) | a run reaches a host whose `{$CERTINEXT.ENV}` doesn't match: an unchanged sandbox `ZABBIX_HOSTNAME`, or a sandbox host left at the `prod` default |
 | dns-persist record missing for `{#APEX}` (HIGH, per apex) | `{$CERTINEXT.PERSIST.EXPECTED}` is unset (`CONFIGURE-ME`) or wrong, or the record really is gone |
+| dns-persist EXPECTED differs from the CA's value (AVERAGE) | after the first daily run, if `{$CERTINEXT.PERSIST.EXPECTED}` is unset or differs from the CA's value; its operational data shows the CA's value to copy (0.2.0rc3+) |
 | dns-persist record not visible publicly / lookup failing (AVERAGE, per apex) | outbound DNS to the public resolvers is blocked, or the agent can't run the lookup |
 | no certificate issued for over `{$CERTINEXT.ORDER.DAYS_SINCE_ISSUED_MAX}` days (WARNING) | the account issues less often than the macro (default 30 days): typical of a sandbox. The item existed in 0.1.x, but the trigger didn't |
 | dns-persist reuse period lapsed (INFORMATION) | the SSL.com reuse window has passed; informational by design |

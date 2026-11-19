@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 import structlog
 from certinext.cli_support import TRACEBACK_HINT, LogFormat, LogMode
 from certinext.orders import OrderRecord
@@ -78,8 +79,14 @@ def _assert_paired_debug_traceback(
     )
 
 
+# Placeholder only: the real per-account value must never land in this
+# repo (it mirrors publicly — certinext-zabbix#12).
+_PERSIST_VALUE = "ca.example; accounturi=https://ca.example.invalid/acct/PLACEHOLDER"
+
+
 def _verified_domain(
     name: str, expires: datetime | None = None, method: str = "DNS-TXT",
+    persist_value: str = _PERSIST_VALUE,
 ) -> MagicMock:
     """Build a mock ACTIVE+VERIFIED domain with a no-op refresh.
 
@@ -88,6 +95,8 @@ def _verified_domain(
         expires: Value for ``dcv_expires`` after refresh, or None.
         method: DCV method its ``get_dcv()`` reports; defaults to a token
             method so pre-split tests keep their meaning.
+        persist_value: The selected option's ``record_value`` (the
+            DNS-PERSIST value when *method* is ``DNS-PERSIST``).
 
     Returns:
         A MagicMock with the Domain attributes the CLI touches.
@@ -97,7 +106,9 @@ def _verified_domain(
     )
     # `name` is a reserved MagicMock constructor kwarg — set the attribute directly.
     domain.name = name
-    domain.get_dcv.return_value = SimpleNamespace(method=method)
+    domain.get_dcv.return_value = SimpleNamespace(
+        method=method, record_value=persist_value, options=[],
+    )
     # No covering ancestor by default, so the default (top) --domain-scope
     # keeps this domain instead of silently filtering it out via
     # certinext.filter_needs_dcv's dcv_covering_parent() check.
@@ -439,6 +450,55 @@ class TestExpiryPath:
         # The cheap metrics and the env guard still go out.
         assert metrics["certinext.domains.total"] == 2
         assert metrics["certinext.env"] == "prod"
+
+    def test_persist_expected_sent_when_apexes_agree(self) -> None:
+        domains = [
+            _verified_domain("a.example.edu", method="DNS-PERSIST"),
+            _verified_domain("b.example.edu", method="DNS-PERSIST", persist_value=f'"{_PERSIST_VALUE}"'),
+        ]
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
+        assert result.exit_code == 0
+        (metrics,) = mocks.push.call_args.args
+        # Quotes normalised away, so both apexes agree.
+        assert metrics["certinext.dcv.persist_expected"] == _PERSIST_VALUE
+
+    def test_no_persist_domains_sends_no_expected_value(self) -> None:
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=[_verified_domain("t.example.edu")])
+        assert result.exit_code == 0
+        (metrics,) = mocks.push.call_args.args
+        assert "certinext.dcv.persist_expected" not in metrics
+
+    @pytest.mark.parametrize("second_value", [
+        "other.example; accounturi=https://other.example.invalid/acct/2", "",
+    ])
+    def test_mixed_or_missing_value_fails_closed_but_keeps_discovery(self, second_value: str) -> None:
+        later = datetime.now(timezone.utc) + timedelta(days=5)
+        domains = [
+            _verified_domain("a.example.edu", expires=later, method="DNS-PERSIST"),
+            _verified_domain("b.example.edu", expires=later, method="DNS-PERSIST", persist_value=second_value),
+        ]
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=domains)
+        assert result.exit_code == 1
+        (metrics,) = mocks.push.call_args.args
+        # Never pick one, never send an empty string.
+        assert "certinext.dcv.persist_expected" not in metrics
+        # The value read must not withhold discovery or expiry metrics.
+        assert metrics["certinext.dcv.persist_apexes"] == 2
+        assert "certinext.dcv.persist.discovery" in metrics
+        assert "certinext.dcv.persist_min_days_left" in metrics
+        assert any(
+            c.args and c.args[0] == "Skipping dns-persist expected value"
+            for c in mocks.log.error.call_args_list
+        )
+
+    def test_dcv_method_failure_also_withholds_expected_value(self) -> None:
+        bad = _verified_domain("bad.example.edu", method="DNS-PERSIST")
+        bad.get_dcv.side_effect = RuntimeError("api down")
+        good = _verified_domain("good.example.edu", method="DNS-PERSIST")
+        result, mocks = _run(argv=["--expiry-days", "14"], domains=[bad, good])
+        assert result.exit_code == 1
+        (metrics,) = mocks.push.call_args.args
+        assert "certinext.dcv.persist_expected" not in metrics
 
     def test_refresh_failure_still_sends_complete_discovery(self) -> None:
         # The method split was complete, so the discovery list is too; only

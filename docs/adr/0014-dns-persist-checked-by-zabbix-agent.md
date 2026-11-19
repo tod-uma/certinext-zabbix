@@ -109,6 +109,36 @@ checks. This came out of the R1 external review (Codex), which noted that
 discovery is only as complete as the CertiNext domain list. That list
 raises on HTTP errors but would end quietly on a short page.
 
+**A stale `EXPECTED` is alerted** (amended 2026-11-18,
+certinext-zabbix#12). The `get_dcv()` call that reads each domain's
+method also returns its DNS-PERSIST option's record value, so the daily
+run sends it, unquoted, to the text trapper
+`certinext.dcv.persist_expected`. No extra API calls are needed. An
+AVERAGE trigger fires on
+`last(persist_expected)<>"{$CERTINEXT.PERSIST.EXPECTED}"`, gated on
+`persist_apexes>0`, and a WARNING `nodata()` on the item (same gate)
+reports a withheld value.
+
+- It catches what the matcher can't: a CA-side change, such as a new
+  account URI. DNS and the macro still agree, so "record missing" stays
+  quiet, but the next issuance fails DCV. A wrong macro raises it too,
+  next to "record missing" on every apex, and its operational data shows
+  the CA's value to copy.
+- It is not the circular check this ADR rules out: the value comes from
+  the CA's API, not from DNS.
+- The matcher is unchanged. The host macro inside the quoted `find()` is
+  proven live (rc2) and is the knob the negative test turns.
+- **Fail closed.** The value is per account and the macro is one per
+  host, so the pusher never picks among different values. If any persist
+  apex returns no value, or they disagree, it sends nothing, logs the
+  apexes per value and exits 1. That read never moves a domain to
+  `failed`, so it can't hold back discovery or the expiry items. A method
+  read failure withholds it along with everything else. Surrounding
+  quotes are stripped; the API returns the value bare today.
+- AVERAGE, not WARNING: the case only this trigger sees is a silent
+  issuance failure waiting to happen. Not HIGH: "record missing" already
+  pages HIGH for the common case, a mistyped macro.
+
 ### Why LLD here, when ADR 0011 rejected it for the CA dimension
 
 The set of persist apexes is data: it grows as institutions move to
@@ -165,9 +195,16 @@ risk here, items deleted after a partial list, is handled by the
   what debounces a real miss.
 - Still to run, live: the misroute test, and a dead `RESOLVER.1` that
   raises "lookup failing" and not "record missing".
-- Follow-up: certinext-zabbix#12 alerts when the configured `EXPECTED`
-  drifts from the CA's value, so a wrong macro is caught at
-  configuration time, not as HIGH on every apex.
+- certinext-zabbix#12 (the `EXPECTED` drift check above):
+  `tests/test_template.py` checks the drift and `nodata()` triggers and
+  their gate; the pusher tests cover fail-closed (a missing or mixed value
+  sends nothing, and discovery and expiry still go out). The substitution
+  it relies on, a host macro inside a string constant compared with a
+  text item's `last()`, already runs live: the misroute trigger on the
+  sandbox host evaluates `<>"sandbox"` (a host-level override) and has
+  stayed OK against stored `sandbox` values (API read, 2026-11-18). Still
+  to run, live, before release: import plus one daily push on 7.0
+  (closed with the right macro, open with a wrong one).
 
 ## Pros and cons of the options
 

@@ -257,7 +257,8 @@ class TestTriggers:
         """
         finds = [
             (t["name"], t["expression"]) for t in _all_triggers(export)
-            if "PERSIST.EXPECTED" in t["expression"]
+            # The drift trigger (#12) uses the macro too, but has no find().
+            if "PERSIST.EXPECTED" in t["expression"] and "find(" in t["expression"]
         ]
         assert len(finds) == 2
         for name, expr in finds:
@@ -276,6 +277,28 @@ class TestTriggers:
         assert len(guard) == 1
         assert '<>"{$CERTINEXT.ENV}"' in guard[0]["expression"]
         assert guard[0]["priority"] == "HIGH"
+
+    def test_persist_expected_drift_compares_macro(self, export: dict[str, Any]) -> None:
+        """The CA's value is compared to the host macro, gated on persist apexes (#12)."""
+        ref = f"/{TEMPLATE_NAME}/{zabbix_push.KEY_PERSIST_EXPECTED})"
+        drift = [t for t in _all_triggers(export) if f"last({ref}<>" in t["expression"]]
+        assert len(drift) == 1
+        expr = drift[0]["expression"]
+        assert f'last({ref}<>"{{$CERTINEXT.PERSIST.EXPECTED}}"' in expr
+        assert f"last(/{TEMPLATE_NAME}/{zabbix_push.KEY_PERSIST_APEXES})>0" in expr
+        assert drift[0]["priority"] == "AVERAGE"
+
+    def test_persist_expected_nodata_gated_on_apexes(self, export: dict[str, Any]) -> None:
+        """A withheld value alerts, but a host with no persist apexes stays quiet."""
+        ref = f"/{TEMPLATE_NAME}/{zabbix_push.KEY_PERSIST_EXPECTED},"
+        nodata = [t for t in _all_triggers(export) if f"nodata({ref}" in t["expression"]]
+        assert len(nodata) == 1
+        assert f"last(/{TEMPLATE_NAME}/{zabbix_push.KEY_PERSIST_APEXES})>0" in nodata[0]["expression"]
+
+    def test_persist_expected_item_is_text(self, template: dict[str, Any]) -> None:
+        """The value is a string; a numeric item would reject every send."""
+        (item,) = [i for i in template["items"] if i["key"] == zabbix_push.KEY_PERSIST_EXPECTED]
+        assert item["value_type"] == "TEXT"
 
 
 class TestStructure:
