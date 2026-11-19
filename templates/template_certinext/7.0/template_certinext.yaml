@@ -775,6 +775,199 @@ zabbix_export:
     - macro: '{$CERTINEXT.UNVERIFIED.MAX_AGE}'
       value: 7h
       description: 'How long unverified domains must persist before alerting (just over one 6-hour run cycle)'
+    dashboards:
+    - uuid: 64d1f503c3184638afa7b02dbacb012c
+      name: 'CertiNext overview'
+      pages:
+      - widgets:
+        - type: item
+          name: 'Domains total'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.domains.total
+        - type: item
+          name: 'Unverified domains'
+          x: '12'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.domains.unverified
+          - type: STRING
+            name: thresholds.0.color
+            value: FFBF59
+          - type: STRING
+            name: thresholds.0.threshold
+            value: '1'
+        - type: item
+          name: 'dns-persist apexes'
+          x: '24'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.dcv.persist_apexes
+        - type: item
+          name: 'Token-method DCV: min days left'
+          x: '36'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.dcv.min_days_left
+        - type: item
+          name: 'Orders awaiting issuance'
+          x: '48'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.unissued
+        - type: item
+          name: 'Days since last certificate issued'
+          x: '60'
+          width: '12'
+          height: '3'
+          fields:
+          - type: ITEM
+            name: itemid.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.days_since_issued
+        - type: problemsbysv
+          name: 'Problems by severity'
+          'y': '3'
+          width: '24'
+          height: '5'
+        - type: problems
+          name: 'Current problems'
+          x: '24'
+          'y': '3'
+          width: '48'
+          height: '5'
+          fields:
+          - type: INTEGER
+            name: show
+            value: '3'
+        - type: svggraph
+          name: Domains
+          'y': '8'
+          width: '24'
+          height: '5'
+          fields:
+          - type: STRING
+            name: ds.0.color.0
+            value: 7499FF
+          - type: STRING
+            name: ds.0.color.1
+            value: FFBF59
+          - type: INTEGER
+            name: ds.0.dataset_type
+            value: '0'
+          - type: ITEM
+            name: ds.0.itemids.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.domains.total
+          - type: ITEM
+            name: ds.0.itemids.1
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.domains.unverified
+          - type: STRING
+            name: reference
+            value: CNXAA
+        - type: svggraph
+          name: 'DCV days left'
+          x: '24'
+          'y': '8'
+          width: '24'
+          height: '5'
+          fields:
+          - type: STRING
+            name: ds.0.color.0
+            value: 7499FF
+          - type: STRING
+            name: ds.0.color.1
+            value: 00C48C
+          - type: INTEGER
+            name: ds.0.dataset_type
+            value: '0'
+          - type: ITEM
+            name: ds.0.itemids.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.dcv.min_days_left
+          - type: ITEM
+            name: ds.0.itemids.1
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.dcv.persist_min_days_left
+          - type: STRING
+            name: reference
+            value: CNXAB
+        - type: svggraph
+          name: Orders
+          x: '48'
+          'y': '8'
+          width: '24'
+          height: '5'
+          fields:
+          - type: STRING
+            name: ds.0.color.0
+            value: 7499FF
+          - type: STRING
+            name: ds.0.color.1
+            value: FFBF59
+          - type: STRING
+            name: ds.0.color.2
+            value: E45959
+          - type: STRING
+            name: ds.0.color.3
+            value: FFA059
+          - type: INTEGER
+            name: ds.0.dataset_type
+            value: '0'
+          - type: ITEM
+            name: ds.0.itemids.0
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.unissued
+          - type: ITEM
+            name: ds.0.itemids.1
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.undownloaded
+          - type: ITEM
+            name: ds.0.itemids.2
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.failed_recent
+          - type: ITEM
+            name: ds.0.itemids.3
+            value:
+              host: 'CertiNext DCV by Zabbix trapper'
+              key: certinext.orders.expiring
+          - type: STRING
+            name: reference
+            value: CNXAC
   triggers:
   - uuid: 4dbfc3e2b4a04f5aad75fe0141ccbb55
     expression: 'last(/CertiNext DCV by Zabbix trapper/certinext.dcv.min_days_left)<={$CERTINEXT.DCV.DISASTER_DAYS} and last(/CertiNext DCV by Zabbix trapper/certinext.dcv.token_domains)>0'

@@ -246,6 +246,24 @@ threshold separates healthy mid-life certificates from lapsed ones. See
 trigger becomes possible once the metric is segmented by originator
 ([IDEA-005](../../../docs/wishlist/IDEA-005-originator-alert-severity-bucketing.md)).
 
+## Dashboard
+
+The template ships one dashboard, **CertiNext overview**. Zabbix shows a
+template dashboard on each linked host, filled with that host's data, so
+each environment gets its own: open the host (*Monitoring → Hosts*, then
+*Dashboards*). A sandbox host shows one only because it has the template;
+nothing else to set up.
+
+| Row | Widgets |
+| --- | --- |
+| Top | Latest values: domains total, unverified domains (yellow at 1 or more), dns-persist apexes, token-method DCV minimum days left, orders awaiting issuance, days since the last certificate was issued |
+| Middle | Problems by severity, and this host's current problems |
+| Bottom | Graphs: domains (total, unverified), DCV days left (token-method, dns-persist), orders (awaiting issuance, awaiting download, failed recently, issued certificates expiring soon) |
+
+A template dashboard can't show two hosts at once. For a single view of
+every environment, build a global dashboard filtered on the host group
+your CertiNext hosts are in; a disabled host drops out of it on its own.
+
 ## Author
 
 Tod Detre — [certinext-zabbix](https://github.com/tod-uma/certinext-zabbix)

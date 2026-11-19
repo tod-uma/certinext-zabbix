@@ -374,3 +374,92 @@ class TestStructure:
             "net.dns.record[{$CERTINEXT.DNS.RESOLVER.1},_validation-persist.{#APEX},TXT]",
             "net.dns.record[{$CERTINEXT.DNS.RESOLVER.2},_validation-persist.{#APEX},TXT]",
         ])
+
+
+#: Width of a Zabbix 7.0 dashboard grid, in columns.
+_DASHBOARD_COLUMNS = 72
+
+
+def _widgets(template: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every widget on every page of the template's dashboards.
+
+    Args:
+        template: The template definition.
+
+    Returns:
+        The widgets, in file order.
+    """
+    return [
+        w
+        for dash in template.get("dashboards", [])
+        for page in dash["pages"]
+        for w in page["widgets"]
+    ]
+
+
+class TestDashboard:
+    """The template dashboard: Zabbix shows it on each linked host (one per environment)."""
+
+    def test_one_dashboard(self, template: dict[str, Any]) -> None:
+        """The template ships exactly one dashboard, with widgets."""
+        assert len(template["dashboards"]) == 1
+        assert _widgets(template)
+
+    def test_item_fields_reference_template_items(self, template: dict[str, Any]) -> None:
+        """Every ITEM field names this template and one of its own item keys.
+
+        A wrong host or key fails the import, or silently drops the widget's data.
+        """
+        keys = {i["key"] for i in template["items"]}
+        refs = [
+            f["value"]
+            for w in _widgets(template)
+            for f in w.get("fields", [])
+            if f["type"] == "ITEM"
+        ]
+        assert refs
+        for ref in refs:
+            assert ref["host"] == TEMPLATE_NAME
+            assert ref["key"] in keys, f"unknown item key {ref['key']!r}"
+
+    def test_widgets_fit_the_grid_without_overlap(self, template: dict[str, Any]) -> None:
+        """Widgets stay inside the 72-column grid and no two share a cell."""
+        cells: set[tuple[int, int]] = set()
+        for w in _widgets(template):
+            x, y = int(w.get("x", 0)), int(w.get("y", 0))
+            width, height = int(w["width"]), int(w["height"])
+            assert x + width <= _DASHBOARD_COLUMNS, w["name"]
+            mine = {(cx, cy) for cx in range(x, x + width) for cy in range(y, y + height)}
+            assert not cells & mine, f"{w['name']!r} overlaps another widget"
+            cells |= mine
+
+    def test_graph_references_unique(self, template: dict[str, Any]) -> None:
+        """Each SVG graph has a unique 5-letter ``reference`` (7.0 requires one)."""
+        refs = [
+            f["value"]
+            for w in _widgets(template) if w["type"] == "svggraph"
+            for f in w["fields"] if f["name"] == "reference"
+        ]
+        assert len(refs) == sum(1 for w in _widgets(template) if w["type"] == "svggraph")
+        assert all(re.fullmatch(r"[A-Z]{5}", r) for r in refs)
+        assert len(refs) == len(set(refs))
+
+    def test_every_graph_item_has_a_color(self, template: dict[str, Any]) -> None:
+        """An SVG data set has one color per item, so no series falls back to a default."""
+        for w in _widgets(template):
+            if w["type"] != "svggraph":
+                continue
+            names = [f["name"] for f in w["fields"]]
+            items = [n for n in names if re.fullmatch(r"ds\.0\.itemids\.\d+", n)]
+            colors = [n for n in names if re.fullmatch(r"ds\.0\.color\.\d+", n)]
+            assert len(items) == len(colors), w["name"]
+
+    def test_fields_in_canonical_order(self, template: dict[str, Any]) -> None:
+        """Fields are sorted by name, as Zabbix exports them.
+
+        Out-of-order fields import fine but make every later import report
+        a change.
+        """
+        for w in _widgets(template):
+            names = [f["name"] for f in w.get("fields", [])]
+            assert names == sorted(names), w["name"]
